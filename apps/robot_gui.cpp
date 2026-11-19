@@ -1,7 +1,6 @@
 #include "robotics/kinematics/ForwardKinematics.hpp"
-#include "robotics/kinematics/InverseKinematics2D.hpp"
+#include "robotics/kinematics/SmoothMotion2D.hpp"
 #include "robotics/kinematics/Jacobian2D.hpp"
-#include "robotics/simulation/Simulation2D.hpp"
 
 #include <raylib.h>
 
@@ -125,8 +124,8 @@ void drawArm(const Viewport& view, const std::vector<Vec2>& positions,
 
 void drawSidebar(int screenWidth, int height, const std::vector<Joint2D>& joints,
                  Vec2 target, Vec2 endEffector, Vec2 tipVelocity,
-                 double error, double elapsed, double reach, bool paused,
-                 bool reached, bool stalled) {
+                 double error, double elapsed, bool paused,
+                 bool reached, bool stalled, bool constrained, bool unreachable) {
     const int x = screenWidth - sidebarWidth;
     DrawRectangle(x, headerHeight, sidebarWidth, height - headerHeight, sidebarColor);
     DrawLine(x, headerHeight, x, height, gridColor);
@@ -136,10 +135,10 @@ void drawSidebar(int screenWidth, int height, const std::vector<Joint2D>& joints
     y += 36;
 
     const char* status = paused ? "PAUSED" : reached ? "TARGET REACHED" :
-        error > 0.0 && target.length() > reach ? "OUT OF REACH" :
-        stalled ? "STALLED" : "MOVING";
+        unreachable ? "UNREACHABLE" :
+        stalled ? "BLOCKED" : constrained ? "AVOIDING CONTACT" : "MOVING";
     const Color statusColor = paused ? orange : reached ? green :
-        (stalled || target.length() > reach) ? red : blue;
+        (stalled || unreachable) ? red : constrained ? orange : blue;
     DrawText(status, left, y, 16, statusColor);
     y += 33;
     DrawText(TextFormat("Time: %.2f s", elapsed), left, y, 16, muted);
@@ -180,11 +179,12 @@ void drawSidebar(int screenWidth, int height, const std::vector<Joint2D>& joints
 } // namespace
 
 int main() {
-    using robotics::kinematics::computeIKCommand;
+    using robotics::kinematics::advanceTowardTarget;
+    using robotics::kinematics::MotionStatus2D;
+    using robotics::kinematics::MotionSettings2D;
     using robotics::kinematics::forwardKinematics;
     using robotics::kinematics::endEffectorJacobian;
     using robotics::kinematics::endEffectorVelocity;
-    using robotics::simulation::advanceJoints;
 
     SetConfigFlags(FLAG_WINDOW_RESIZABLE | FLAG_MSAA_4X_HINT);
     InitWindow(initialWidth, initialHeight, "RobotArm Simulator - 2D");
@@ -198,6 +198,8 @@ int main() {
     double accumulator = 0.0;
     bool paused = false;
     float zoom = 1.0F;
+    MotionStatus2D motionState{};
+    const MotionSettings2D motionSettings{};
 
     while (!WindowShouldClose()) {
         if (IsKeyPressed(KEY_SPACE)) {
@@ -218,6 +220,7 @@ int main() {
             simulatedTime = 0.0;
             accumulator = 0.0;
             paused = false;
+            motionState = {};
         }
 
         const int width = GetScreenWidth();
@@ -242,11 +245,7 @@ int main() {
             // Fixed-step control, independent of rendering refresh rate.
             accumulator += std::min(static_cast<double>(GetFrameTime()), 0.1);
             for (int steps = 0; accumulator >= fixedDt && steps < 6; ++steps) {
-                const auto command = computeIKCommand(joints, target);
-                for (std::size_t i = 0; i < joints.size(); ++i) {
-                    joints[i].angularVelocity = command.angularVelocities[i];
-                }
-                advanceJoints(joints, fixedDt);
+                motionState = advanceTowardTarget(joints, target, fixedDt, motionSettings);
                 simulatedTime += fixedDt;
                 accumulator -= fixedDt;
             }
@@ -257,14 +256,25 @@ int main() {
         const auto velocity = endEffectorVelocity(jacobian, joints);
         const double error = (target - positions.back()).length();
         const bool reached = error <= 0.005;
-        const bool stalled = !reached && velocity.length() < 1e-7;
+        const bool stalled = !reached && motionState.blocked;
+        const double radius = target.length();
+        bool unreachable = radius > reach;
+        if (joints.size() == 2) {
+            const double margin = motionSettings.jointClearance;
+            const double innerRadius = std::hypot(joints[0].length + joints[1].length *
+                std::cos(std::numbers::pi - margin), joints[1].length *
+                std::sin(std::numbers::pi - margin));
+            const double outerRadius = std::hypot(joints[0].length + joints[1].length *
+                std::cos(margin), joints[1].length * std::sin(margin));
+            unreachable = radius < innerRadius || radius > outerRadius;
+        }
 
         BeginDrawing();
         ClearBackground(background);
         DrawRectangle(0, headerHeight, canvasWidth, height - headerHeight, canvasColor);
         drawGrid(viewport, canvasWidth, height);
         BeginScissorMode(0, headerHeight, canvasWidth, height - headerHeight);
-        drawArm(viewport, positions, target, target.length() <= reach);
+        drawArm(viewport, positions, target, !unreachable);
         EndScissorMode();
         DrawText("CLICK/DRAG Target   SPACE Pause   R Reset   2/3 Joints   WHEEL Zoom",
                  20, height - 28, 15, muted);
@@ -272,7 +282,8 @@ int main() {
         DrawText("ROBOTARM", 23, 16, 25, light);
         DrawText("2D Kinematics Laboratory", 197, 22, 17, muted);
         drawSidebar(width, height, joints, target, positions.back(), velocity,
-                    error, simulatedTime, reach, paused, reached, stalled);
+                    error, simulatedTime, paused, reached, stalled,
+                    motionState.constrained, unreachable);
         EndDrawing();
     }
 

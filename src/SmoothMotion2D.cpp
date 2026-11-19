@@ -1,0 +1,239 @@
+#include "robotics/kinematics/SmoothMotion2D.hpp"
+
+#include "robotics/kinematics/ForwardKinematics.hpp"
+#include "robotics/kinematics/InverseKinematics2D.hpp"
+
+#include <algorithm>
+#include <cmath>
+#include <numbers>
+#include <stdexcept>
+#include <vector>
+
+namespace robotics::kinematics {
+namespace {
+constexpr double pi = std::numbers::pi;
+constexpr double twicePi = 2.0 * pi;
+
+bool finite(math::Vec2 p) {
+    return std::isfinite(p.x) && std::isfinite(p.y);
+}
+
+double cross(math::Vec2 a, math::Vec2 b) {
+    return a.x * b.y - a.y * b.x;
+}
+
+double pointDistance(math::Vec2 p, math::Vec2 a, math::Vec2 b) {
+    const auto ab = b - a;
+    const double d = ab.dot(ab);
+    const double t = d > 0.0 ? std::clamp((p - a).dot(ab) / d, 0.0, 1.0) : 0.0;
+    return (p - (a + ab * t)).length();
+}
+
+double segmentDistance(math::Vec2 a, math::Vec2 b, math::Vec2 c, math::Vec2 d) {
+    const auto ab = b - a;
+    const auto cd = d - c;
+    const double abCrossCd = cross(ab, cd);
+    if (std::abs(abCrossCd) > 1e-12) {
+        const double t = cross(c - a, cd) / abCrossCd;
+        const double u = cross(c - a, ab) / abCrossCd;
+        if (t >= 0.0 && t <= 1.0 && u >= 0.0 && u <= 1.0) {
+            return 0.0;
+        }
+    }
+    return std::min({pointDistance(a, c, d), pointDistance(b, c, d),
+                     pointDistance(c, a, b), pointDistance(d, a, b)});
+}
+
+// Keep each internal joint on its original branch and away from collinearity.
+bool allowedAngles(std::span<const Joint2D> current,
+                   std::span<const Joint2D> next, double margin) {
+    for (std::size_t i = 1; i < current.size(); ++i) {
+        const double sign = std::signbit(current[i].angle) ? -1.0 : 1.0;
+        const double folded = sign * next[i].angle;
+        if (folded < margin || folded > pi - margin) return false;
+    }
+    return true;
+}
+
+double slewVelocity(double current, double desired, double acceleration, double dt) {
+    return current + std::clamp(desired - current, -acceleration * dt,
+                                acceleration * dt);
+}
+
+// Use proportional feedback, a braking-distance bound and acceleration limiting.
+double servoVelocity(double angle, double goal, double velocity,
+                     double dt, const MotionSettings2D& options) {
+    const double delta = goal - angle;
+    const double braking = std::sqrt(2.0 * options.maxAngularAcceleration * std::abs(delta));
+    const double targetSpeed = std::copysign(
+        std::min({options.maxAngularSpeed, 4.0 * std::abs(delta), braking}), delta);
+    return slewVelocity(velocity, targetSpeed, options.maxAngularAcceleration, dt);
+}
+
+// Closed-form two-link IK, preserving the current elbow branch.
+std::vector<double> analyticTwoLinkPose(std::span<const Joint2D> joints,
+                                        math::Vec2 target, double margin,
+                                        math::Vec2 tip) {
+    const double l1 = joints[0].length, l2 = joints[1].length;
+    const double r = target.length();
+    const double minR = std::hypot(l1 + l2 * std::cos(pi - margin),
+                                  l2 * std::sin(pi - margin));
+    const double maxR = std::hypot(l1 + l2 * std::cos(margin),
+                                  l2 * std::sin(margin));
+    const double clampedR = std::clamp(r, minR, maxR);
+    const double bearing = r > 0.01 ? std::atan2(target.y, target.x)
+                                    : std::atan2(tip.y, tip.x);
+    const double cosine = std::clamp(
+        (clampedR * clampedR - l1 * l1 - l2 * l2) / (2.0 * l1 * l2), -1.0, 1.0);
+    const double sign = std::signbit(joints[1].angle) ? -1.0 : 1.0;
+    const double elbow = sign * std::acos(cosine);
+    const double shoulder = bearing - std::atan2(l2 * std::sin(elbow),
+                                                l1 + l2 * std::cos(elbow));
+    return {joints[0].angle + std::remainder(shoulder - joints[0].angle, twicePi),
+            elbow};
+}
+
+} // namespace
+
+bool hasSelfCollision(std::span<const math::Vec2> positions, double clearance) {
+    if (!std::isfinite(clearance) || clearance < 0.0)
+        throw std::invalid_argument("Self collision clearance must be finite and nonnegative");
+    for (const auto& position : positions) {
+        if (!finite(position)) throw std::invalid_argument("Invalid position");
+    }
+    const std::size_t links = positions.empty() ? 0 : positions.size() - 1;
+    for (std::size_t i = 0; i < links; ++i) {
+        for (std::size_t j = i + 2; j < links; ++j) {
+            if (segmentDistance(positions[i], positions[i + 1],
+                                positions[j], positions[j + 1]) <= clearance)
+                return true;
+        }
+    }
+    return false;
+}
+
+MotionStatus2D advanceTowardTarget(std::span<Joint2D> joints, math::Vec2 target,
+                                   double dt, const MotionSettings2D& options) {
+    if (joints.size() < 2 || !finite(target) || !std::isfinite(dt) ||
+        dt <= 0.0 || dt > 0.1 ||
+        !std::isfinite(options.maxAngularSpeed) || options.maxAngularSpeed <= 0.0 ||
+        !std::isfinite(options.maxAngularAcceleration) || options.maxAngularAcceleration <= 0.0 ||
+        !std::isfinite(options.jointClearance) || options.jointClearance <= 0.0 ||
+        options.jointClearance >= pi / 2.0 || !std::isfinite(options.linkClearance) ||
+        options.linkClearance < 0.0 || !std::isfinite(options.positionTolerance) ||
+        options.positionTolerance <= 0.0) {
+        throw std::invalid_argument("Invalid motion parameters");
+    }
+    double totalLength = 0.0;
+    for (const auto& joint : joints) {
+        if (!std::isfinite(joint.length) || joint.length <= 0.0 ||
+            !std::isfinite(joint.angle) || !std::isfinite(joint.angularVelocity) ||
+            std::abs(joint.angularVelocity) > options.maxAngularSpeed + 1e-9)
+            throw std::invalid_argument("Invalid joint state");
+        totalLength += joint.length;
+    }
+    if (!std::isfinite(totalLength)) throw std::overflow_error("Invalid arm reach");
+    const auto positions = forwardKinematics(joints);
+    if (!allowedAngles(joints, joints, options.jointClearance) ||
+        hasSelfCollision(positions, options.linkClearance))
+        throw std::invalid_argument("Robot starts in an unsafe configuration");
+
+    MotionStatus2D status;
+    status.positionError = (target - positions.back()).length();
+    if (!std::isfinite(status.positionError))
+        throw std::overflow_error("Target position error overflow");
+    status.reached = status.positionError <= options.positionTolerance;
+    status.outOfReach = target.length() > totalLength;
+    if (joints.size() == 2) {
+        const auto pose = analyticTwoLinkPose(
+            joints, target, options.jointClearance, positions.back());
+        const double targetRadius = target.length();
+        const double minRadius = std::hypot(joints[0].length + joints[1].length *
+                         std::cos(pi - options.jointClearance),
+                         joints[1].length * std::sin(pi - options.jointClearance));
+        const double maxRadius = std::hypot(joints[0].length + joints[1].length *
+                         std::cos(options.jointClearance),
+                         joints[1].length * std::sin(options.jointClearance));
+        status.outOfReach = targetRadius < minRadius || targetRadius > maxRadius;
+
+        std::vector<Joint2D> proposal(joints.begin(), joints.end());
+        for (std::size_t i = 0; i < joints.size(); ++i) {
+            const double delta = pose[i] - joints[i].angle;
+            double speed = servoVelocity(joints[i].angle, pose[i],
+                                         joints[i].angularVelocity, dt, options);
+            if (std::abs(delta) < 1e-8 &&
+                std::abs(speed) < options.maxAngularAcceleration * dt)
+                speed = 0.0;
+            double nextAngle = joints[i].angle + speed * dt;
+            if (std::abs(speed) <= options.maxAngularAcceleration * dt &&
+                ((delta >= 0.0 && nextAngle > pose[i]) ||
+                 (delta < 0.0 && nextAngle < pose[i]))) {
+                nextAngle = pose[i];
+                speed = 0.0;
+            }
+            proposal[i].angle = nextAngle;
+            proposal[i].angularVelocity = speed;
+        }
+        if (!allowedAngles(joints, proposal, options.jointClearance - 1e-9)) {
+            status.constrained = true;
+            // Handle roundoff at the configured elbow margin.
+            proposal[1].angle = std::clamp(proposal[1].angle,
+                std::signbit(joints[1].angle) ? -pi + options.jointClearance : options.jointClearance,
+                std::signbit(joints[1].angle) ? -options.jointClearance : pi - options.jointClearance);
+            proposal[1].angularVelocity = (proposal[1].angle - joints[1].angle) / dt;
+        }
+        std::copy(proposal.begin(), proposal.end(), joints.begin());
+    } else {
+        // Damped least squares for redundant arms, plus a collision-checked step.
+        math::Vec2 effectiveTarget = target;
+        const double targetRadius = target.length();
+        if (targetRadius > totalLength - 0.01) {
+            effectiveTarget = target * ((totalLength - 0.01) / targetRadius);
+        }
+        const auto command = computeIKCommand(joints, effectiveTarget);
+        std::vector<Joint2D> proposal(joints.begin(), joints.end());
+        for (std::size_t i = 0; i < joints.size(); ++i) {
+            proposal[i].angularVelocity = slewVelocity(
+                joints[i].angularVelocity, command.angularVelocities[i],
+                options.maxAngularAcceleration, dt);
+            proposal[i].angularVelocity = std::clamp(proposal[i].angularVelocity,
+                -options.maxAngularSpeed, options.maxAngularSpeed);
+        }
+        // Backtrack the step if a joint limit or self-collision is predicted.
+        // Substeps also guard against passing through thin links in one frame.
+        double scale = 1.0;
+        bool safe = false;
+        std::vector<Joint2D> intermediate(joints.begin(), joints.end());
+        for (int attempt = 0; attempt < 18; ++attempt, scale *= 0.5) {
+            safe = true;
+            for (int sub = 1; sub <= 4; ++sub) {
+                for (std::size_t i = 0; i < joints.size(); ++i) {
+                    intermediate[i] = joints[i];
+                    intermediate[i].angle += proposal[i].angularVelocity * dt * scale *
+                                             (static_cast<double>(sub) / 4.0);
+                }
+                if (!allowedAngles(joints, intermediate, options.jointClearance) ||
+                    hasSelfCollision(forwardKinematics(intermediate), options.linkClearance)) {
+                    safe = false;
+                    break;
+                }
+            }
+            if (safe) break;
+        }
+        if (scale < 1.0 || !safe) status.constrained = true;
+        if (!safe) {
+            status.blocked = true;
+            for (auto& joint : joints) joint.angularVelocity = 0.0;
+        } else {
+            for (std::size_t i = 0; i < joints.size(); ++i) {
+                joints[i].angularVelocity = proposal[i].angularVelocity * scale;
+                joints[i].angle += joints[i].angularVelocity * dt;
+            }
+        }
+    }
+    status.positionError = (target - forwardKinematics(joints).back()).length();
+    status.reached = status.positionError <= options.positionTolerance;
+    return status;
+}
+
+} // namespace robotics::kinematics
