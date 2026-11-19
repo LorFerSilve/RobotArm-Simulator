@@ -8,3 +8,30 @@ project(RobotArmSimulator
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
+
+add_library(robotics_core STATIC
+    src/ForwardKinematics.cpp
+)
+
+target_include_directories(robotics_core PUBLIC
+    "${PROJECT_SOURCE_DIR}/include"
+)
+
+add_executable(robot_cli
+    apps/robot_cli.cpp
+)
+target_link_libraries(robot_cli PRIVATE robotics_core)
+
+enable_testing()
+
+add_executable(test_vec2
+    tests/test_vec2.cpp
+)
+target_link_libraries(test_vec2 PRIVATE robotics_core)
+add_test(NAME Vec2 COMMAND test_vec2)
+
+add_executable(test_forward_kinematics
+    tests/test_forward_kinematics.cpp
+)
+target_link_libraries(test_forward_kinematics PRIVATE robotics_core)
+add_test(NAME ForwardKinematics COMMAND test_forward_kinematics)
