@@ -11,6 +11,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 add_library(robotics_core STATIC
     src/ForwardKinematics.cpp
+    src/Simulation2D.cpp
 )
 
 target_include_directories(robotics_core PUBLIC
@@ -35,3 +36,9 @@ add_executable(test_forward_kinematics
 )
 target_link_libraries(test_forward_kinematics PRIVATE robotics_core)
 add_test(NAME ForwardKinematics COMMAND test_forward_kinematics)
+
+add_executable(test_simulation
+    tests/test_simulation.cpp
+)
+target_link_libraries(test_simulation PRIVATE robotics_core)
+add_test(NAME Simulation2D COMMAND test_simulation)
