@@ -1,4 +1,5 @@
 #include "robotics/kinematics/ForwardKinematics.hpp"
+#include "robotics/kinematics/Jacobian2D.hpp"
 #include "robotics/simulation/Simulation2D.hpp"
 
 #include <charconv>
@@ -11,6 +12,9 @@
 int main(int argc, char* argv[]) {
     using robotics::kinematics::Joint2D;
     using robotics::kinematics::forwardKinematics;
+    using robotics::kinematics::endEffectorJacobian;
+    using robotics::kinematics::endEffectorVelocity;
+    using robotics::kinematics::jacobianDeterminant2D;
     using robotics::simulation::advanceJoints;
 
     constexpr std::size_t defaultSteps = 10;
@@ -42,6 +46,8 @@ int main(int argc, char* argv[]) {
     std::cout << std::fixed << std::setprecision(4);
     for (std::size_t frame = 0; frame <= steps; ++frame) {
         const auto positions = forwardKinematics(joints);
+        const auto jacobian = endEffectorJacobian(positions);
+        const auto velocity = endEffectorVelocity(jacobian, joints);
         std::cout << "Frame " << frame << " | t=" << frame * dt << " s\n";
         for (std::size_t i = 0; i < joints.size(); ++i) {
             std::cout << "  Joint " << i + 1
@@ -52,6 +58,16 @@ int main(int argc, char* argv[]) {
         }
         const auto& tip = positions.back();
         std::cout << "  End effector: (" << tip.x << ", " << tip.y << ") m\n";
+        std::cout << "  End effector velocity: (" << velocity.x << ", "
+                  << velocity.y << ") m/s\n";
+        for (std::size_t i = 0; i < jacobian.size(); ++i) {
+            std::cout << "  Jacobian column " << i + 1 << ": ("
+                      << jacobian[i].x << ", " << jacobian[i].y << ") m/rad\n";
+        }
+        if (jacobian.size() == 2) {
+            std::cout << "  Jacobian determinant: "
+                      << jacobianDeterminant2D(jacobian) << " m^2\n";
+        }
 
         if (frame != steps) {
             advanceJoints(joints, dt);

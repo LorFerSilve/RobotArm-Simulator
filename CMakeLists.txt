@@ -12,6 +12,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 add_library(robotics_core STATIC
     src/ForwardKinematics.cpp
     src/Simulation2D.cpp
+    src/Jacobian2D.cpp
 )
 
 target_include_directories(robotics_core PUBLIC
@@ -42,3 +43,9 @@ add_executable(test_simulation
 )
 target_link_libraries(test_simulation PRIVATE robotics_core)
 add_test(NAME Simulation2D COMMAND test_simulation)
+
+add_executable(test_jacobian
+    tests/test_jacobian.cpp
+)
+target_link_libraries(test_jacobian PRIVATE robotics_core)
+add_test(NAME Jacobian2D COMMAND test_jacobian)
