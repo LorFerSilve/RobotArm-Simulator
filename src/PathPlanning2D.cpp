@@ -298,7 +298,7 @@ double distanceSquared(const Angles& a, const Angles& b) {
         !c.valid(start)) return false;
     const double r = c.target.length();
     if (r <= c.settings.targetClearance ||
-        r >= c.joints[0].length - c.settings.targetClearance)
+        r > c.joints[0].length + c.settings.targetClearance)
         return false;
     const double theta = std::atan2(c.target.y, c.target.x);
     for (const auto& goal : goals) {
