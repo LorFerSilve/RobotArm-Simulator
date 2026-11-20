@@ -124,8 +124,9 @@ target contact, self-collision, relative joint limits, angular velocity
 and angular acceleration. If a case fails, the test prints the **full
 initial position list and target**, so it can be copied into a permanent
 named regression fixture. The random seeds and enumeration order are
-stable. The generated cases are intentionally modest, verified feasible
-rotations of a multijoint arm; add harder named adversarial cases as
+stable. The generated cases include verified feasible shoulder-only rotations,
+proximal-joint adjustments, distal-joint adjustments, and coordinated
+multi-joint movements. Add harder named adversarial cases as
 playtests uncover new failure modes.
 
 Run the full suite locally:
@@ -144,3 +145,15 @@ ctest --test-dir build -R ReleaseMotionStress --output-on-failure
 For Visual Studio, add `--config Debug` to the build and `-C Debug`
 to `ctest`. The 7-joint case is an **engine-only** test, not a new GUI
 preset.
+
+To inspect or archive every concrete (base, joint 1, …, end effector)
+starting position together with its target:
+
+```powershell
+.\build\test_release_motions.exe --stress --list > release-motion-cases.txt
+```
+
+On Visual Studio Debug builds, use
+`.\build\Debug\test_release_motions.exe` instead.
+The text output is a reproducible snapshot of the generated corpus.
+The seed and generator are committed to version control.

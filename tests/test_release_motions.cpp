@@ -172,8 +172,23 @@ CaseGroup buildGroup(int n, int desiredCount, const MotionSettings2D& settings) 
         }
 
         auto endAngles = angles;
+        // Mix shoulder-only rotation with cases that require coordinated
+        // adjustments of proximal, distal, and multiple internal joints.
+        // These are more informative than hundreds of rigidly rotated poses.
+        const int mode = attempt % 5;
         endAngles[0] += (attempt % 2 ? 1.0 : -1.0) *
                         rotationDistribution(rng);
+        for (int j = 1; j < n; ++j) {
+            const bool change =
+                (mode == 1 && j == 1) ||
+                (mode == 2 && j == n - 1) ||
+                (mode == 3 && j % 2 == 0) ||
+                (mode == 4 && j % 2 == 1);
+            if (change)
+                endAngles[static_cast<std::size_t>(j)] +=
+                    (j % 2 == 0 ? 1.0 : -1.0) *
+                    (0.04 + 0.14 * (static_cast<double>((attempt + j) % 7) / 6.0));
+        }
         const Vec2 target = positionsFromAngles(lengths, endAngles).back();
         if (!witnessIsSafe(lengths, angles, endAngles, target, settings)) continue;
         if ((target - beginPositions.back()).length() <= 0.1) continue;
@@ -262,8 +277,15 @@ int main(int argc, char** argv) {
     try {
         // 20 per group by default = 120 certified-reachable motions.
         // Explicit stress mode runs 100 per group = 600 motions.
-        const bool stress = argc == 2 && std::string(argv[1]) == "--stress";
-        check(argc == 1 || stress, "Usage: test_release_motions [--stress]");
+        bool stress = false;
+        bool list = false;
+        for (int i = 1; i < argc; ++i) {
+            const std::string argument(argv[i]);
+            if (argument == "--stress") stress = true;
+            else if (argument == "--list") list = true;
+            else throw std::invalid_argument(
+                "Usage: test_release_motions [--stress] [--list]");
+        }
         const int perGroup = stress ? 100 : 20;
         const auto settings = safetySettings();
 
@@ -271,6 +293,17 @@ int main(int argc, char** argv) {
         for (int n = 2; n <= 7; ++n)
             groups[static_cast<std::size_t>(n - 2)] =
                 buildGroup(n, perGroup, settings);
+
+        // Inspect or archive the entire Cartesian fixture corpus without
+        // executing the trajectories; each line preserves all joint points.
+        if (list) {
+            for (int n = 2; n <= 7; ++n) {
+                std::cout << "GROUP " << n << " joints\n";
+                for (const auto& test : groups[static_cast<std::size_t>(n - 2)])
+                    std::cout << describe(test) << "\n";
+            }
+            return 0;
+        }
 
         int successful = 0;
         for (int n = 2; n <= 7; ++n) {
