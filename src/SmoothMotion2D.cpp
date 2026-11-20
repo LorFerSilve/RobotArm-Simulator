@@ -55,6 +55,17 @@ bool allowedAngles(std::span<const Joint2D> current,
     return true;
 }
 
+bool withinLimits(std::span<const Joint2D> joints,
+                  std::span<const JointLimits2D> limits) {
+    if (limits.empty()) return true;
+    for (std::size_t i = 0; i < joints.size(); ++i) {
+        if (joints[i].angle < limits[i].minAngle - 1e-9 ||
+            joints[i].angle > limits[i].maxAngle + 1e-9)
+            return false;
+    }
+    return true;
+}
+
 double slewVelocity(double current, double desired, double acceleration, double dt) {
     return current + std::clamp(desired - current, -acceleration * dt,
                                 acceleration * dt);
@@ -62,12 +73,12 @@ double slewVelocity(double current, double desired, double acceleration, double 
 
 // Use proportional feedback, a braking-distance bound and acceleration limiting.
 double servoVelocity(double angle, double goal, double velocity,
-                     double dt, const MotionSettings2D& options) {
+                     double dt, double maxSpeed, double maxAcceleration) {
     const double delta = goal - angle;
-    const double braking = std::sqrt(2.0 * options.maxAngularAcceleration * std::abs(delta));
+    const double braking = std::sqrt(2.0 * maxAcceleration * std::abs(delta));
     const double targetSpeed = std::copysign(
-        std::min({options.maxAngularSpeed, 4.0 * std::abs(delta), braking}), delta);
-    return slewVelocity(velocity, targetSpeed, options.maxAngularAcceleration, dt);
+        std::min({maxSpeed, 4.0 * std::abs(delta), braking}), delta);
+    return slewVelocity(velocity, targetSpeed, maxAcceleration, dt);
 }
 
 // Closed-form two-link IK, preserving the current elbow branch.
@@ -113,7 +124,8 @@ bool hasSelfCollision(std::span<const math::Vec2> positions, double clearance) {
 }
 
 MotionStatus2D advanceTowardTarget(std::span<Joint2D> joints, math::Vec2 target,
-                                   double dt, const MotionSettings2D& options) {
+                                   double dt, const MotionSettings2D& options,
+                                   std::span<const JointLimits2D> limits) {
     if (joints.size() < 2 || !finite(target) || !std::isfinite(dt) ||
         dt <= 0.0 || dt > 0.1 ||
         !std::isfinite(options.maxAngularSpeed) || options.maxAngularSpeed <= 0.0 ||
@@ -124,12 +136,25 @@ MotionStatus2D advanceTowardTarget(std::span<Joint2D> joints, math::Vec2 target,
         options.positionTolerance <= 0.0) {
         throw std::invalid_argument("Invalid motion parameters");
     }
+    if (!limits.empty() && limits.size() != joints.size())
+        throw std::invalid_argument("Joint limits must match the number of joints");
     double totalLength = 0.0;
-    for (const auto& joint : joints) {
+    for (std::size_t i = 0; i < joints.size(); ++i) {
+        const auto& joint = joints[i];
         if (!std::isfinite(joint.length) || joint.length <= 0.0 ||
             !std::isfinite(joint.angle) || !std::isfinite(joint.angularVelocity) ||
             std::abs(joint.angularVelocity) > options.maxAngularSpeed + 1e-9)
             throw std::invalid_argument("Invalid joint state");
+        if (!limits.empty()) {
+            const auto& lim = limits[i];
+            if (!std::isfinite(lim.minAngle) || !std::isfinite(lim.maxAngle) ||
+                lim.minAngle >= lim.maxAngle ||
+                !std::isfinite(lim.maxAngularSpeed) || lim.maxAngularSpeed <= 0.0 ||
+                !std::isfinite(lim.maxAngularAcceleration) || lim.maxAngularAcceleration <= 0.0 ||
+                std::abs(joint.angularVelocity) > lim.maxAngularSpeed + 1e-9 ||
+                joint.angle < lim.minAngle - 1e-9 || joint.angle > lim.maxAngle + 1e-9)
+                throw std::invalid_argument("Invalid individual joint limits or state");
+        }
         totalLength += joint.length;
     }
     if (!std::isfinite(totalLength)) throw std::overflow_error("Invalid arm reach");
@@ -158,18 +183,30 @@ MotionStatus2D advanceTowardTarget(std::span<Joint2D> joints, math::Vec2 target,
 
         std::vector<Joint2D> proposal(joints.begin(), joints.end());
         for (std::size_t i = 0; i < joints.size(); ++i) {
-            const double delta = pose[i] - joints[i].angle;
-            double speed = servoVelocity(joints[i].angle, pose[i],
-                                         joints[i].angularVelocity, dt, options);
-            if (std::abs(delta) < 1e-8 &&
-                std::abs(speed) < options.maxAngularAcceleration * dt)
+            const double goal = limits.empty() ? pose[i] :
+                std::clamp(pose[i], limits[i].minAngle, limits[i].maxAngle);
+            if (goal != pose[i]) status.constrained = true;
+            const double maxSpeed = limits.empty() ? options.maxAngularSpeed :
+                std::min(options.maxAngularSpeed, limits[i].maxAngularSpeed);
+            const double maxAcceleration = limits.empty() ? options.maxAngularAcceleration :
+                std::min(options.maxAngularAcceleration, limits[i].maxAngularAcceleration);
+            const double delta = goal - joints[i].angle;
+            double speed = servoVelocity(joints[i].angle, goal,
+                joints[i].angularVelocity, dt, maxSpeed, maxAcceleration);
+            if (std::abs(delta) < 1e-8 && std::abs(speed) < maxAcceleration * dt)
                 speed = 0.0;
             double nextAngle = joints[i].angle + speed * dt;
-            if (std::abs(speed) <= options.maxAngularAcceleration * dt &&
-                ((delta >= 0.0 && nextAngle > pose[i]) ||
-                 (delta < 0.0 && nextAngle < pose[i]))) {
-                nextAngle = pose[i];
+            if (std::abs(speed) <= maxAcceleration * dt &&
+                ((delta >= 0.0 && nextAngle > goal) ||
+                 (delta < 0.0 && nextAngle < goal))) {
+                nextAngle = goal;
                 speed = 0.0;
+            }
+            if (!limits.empty() &&
+                (nextAngle < limits[i].minAngle || nextAngle > limits[i].maxAngle)) {
+                nextAngle = std::clamp(nextAngle, limits[i].minAngle, limits[i].maxAngle);
+                speed = (nextAngle - joints[i].angle) / dt;
+                status.constrained = true;
             }
             proposal[i].angle = nextAngle;
             proposal[i].angularVelocity = speed;
@@ -193,11 +230,15 @@ MotionStatus2D advanceTowardTarget(std::span<Joint2D> joints, math::Vec2 target,
         const auto command = computeIKCommand(joints, effectiveTarget);
         std::vector<Joint2D> proposal(joints.begin(), joints.end());
         for (std::size_t i = 0; i < joints.size(); ++i) {
+            const double maxAcceleration = limits.empty() ? options.maxAngularAcceleration :
+                std::min(options.maxAngularAcceleration, limits[i].maxAngularAcceleration);
+            const double maxSpeed = limits.empty() ? options.maxAngularSpeed :
+                std::min(options.maxAngularSpeed, limits[i].maxAngularSpeed);
             proposal[i].angularVelocity = slewVelocity(
                 joints[i].angularVelocity, command.angularVelocities[i],
-                options.maxAngularAcceleration, dt);
+                maxAcceleration, dt);
             proposal[i].angularVelocity = std::clamp(proposal[i].angularVelocity,
-                -options.maxAngularSpeed, options.maxAngularSpeed);
+                -maxSpeed, maxSpeed);
         }
         // Backtrack the step if a joint limit or self-collision is predicted.
         // Substeps also guard against passing through thin links in one frame.
@@ -213,6 +254,7 @@ MotionStatus2D advanceTowardTarget(std::span<Joint2D> joints, math::Vec2 target,
                                              (static_cast<double>(sub) / 4.0);
                 }
                 if (!allowedAngles(joints, intermediate, options.jointClearance) ||
+                    !withinLimits(intermediate, limits) ||
                     hasSelfCollision(forwardKinematics(intermediate), options.linkClearance)) {
                     safe = false;
                     break;

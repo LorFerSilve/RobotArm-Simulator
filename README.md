@@ -9,8 +9,9 @@ A modular C++20 robotic arm simulator featuring custom kinematics, Jacobian-base
 - Analytic 2 x N Jacobian, Cartesian end-effector velocity, and 2-joint determinant.
 - Custom damped least-squares inverse kinematics, velocity limiting, and target tolerance.
 - Collision-aware GUI motion: analytic two-link IK with a stable elbow branch, angular speed/acceleration caps, joint clearance, and nonadjacent link collision checks for three or more links.
-- CLI frame telemetry and five automatic tests using CTest.
-- Interactive 2D GUI, using raylib **only** for display and input: target selection by mouse, 2/3-joint presets, real-time telemetry, pause/reset, grid and zoom.
+- CLI frame telemetry and eight automatic tests using CTest.
+- Interactive 2D GUI, using raylib **only** for display and input: target selection by mouse, real-time telemetry, pause/reset, grid and zoom.
+- **Configurable robot arm (Phase 1):** edit 2–6 joints, each link's length and initial relative angle, per-joint rotation range, maximum speed, and maximum acceleration in the GUI.
 
 The GUI and CLI use the **same** C++20 robotics engine. The GUI simulates **kinematics only**, without forces, torques, or 3D dynamics. Its motion controller now prevents specified link overlaps but does not model full rigid-body physics.
 
@@ -55,6 +56,10 @@ The GUI uses 60 Hz fixed-step simulation and a 60 FPS rendering target. Renderin
 | `2` | Two-joint robot preset |
 | `3` | Three-joint robot preset |
 | Mouse wheel over canvas | Zoom |
+| `CONFIGURE` tab | Edit a draft robot configuration |
+| `+ ADD JOINT` / `- REMOVE JOINT` | Change the link count (2–6) |
+| `APPLY & RESET ROBOT` | Validate and activate new geometry and joint limits, paused |
+| `TELEMETRY` tab | Return to live joint measurements |
 
 The right panel shows target and tip coordinates, Cartesian speed, goal error, simulation time, per-joint angles and angular velocities.
 
@@ -80,3 +85,31 @@ Defaults: 2 rad/s maximum angular speed, 6 rad/s² maximum angular
 acceleration, 0.14 rad elbow margin, 0.10 m nonadjacent-link clearance.
 These are **kinematic simulation constraints**, not a certified industrial
 collision model. Reaching every feasible goal is not guaranteed.
+
+## Configurable robot arm — Phase 1
+
+The right-hand **CONFIGURE** tab contains a simple, dependency-free editor
+built with raylib controls. Select a joint with the arrow buttons; use +/- to
+adjust its **length (metres), initial angle (degrees), minimum/maximum angle
+(degrees), maximum angular speed (degrees/s)**, and **maximum angular
+acceleration (degrees/s²)**. Add or remove joints (minimum 2, maximum 6 in
+the current GUI). Changes are drafts until **APPLY & RESET ROBOT** is clicked.
+
+Applying a valid configuration resets the arm to its configured initial
+angles, resets simulated time, and pauses the simulation. Press **Space** to
+resume; press **R** to reset to the *last applied* configuration. The original
+`2` and `3` shortcuts still load their respective presets. Configurations
+are held in memory for this session, not yet saved to a file.
+
+The geometry and initial limits are represented by
+`JointDefinition2D`; `Robot2D` contains the **mutable runtime state**
+plus the independent per-joint limits. `makeRobot2D` validates the settings
+before activating them. In addition to the existing geometric safeguards,
+the motion controller now enforces each joint's configured range, speed,
+and acceleration caps (up to the engine's global caps).
+
+Internal joints must stay within one safe positive or negative elbow branch,
+avoiding fully folded and straight configurations. Consequently, some
+angle ranges are intentionally rejected. Valid configurations are not
+guaranteed to reach every requested target, and collision avoidance for
+three or more joints remains a local controller, not a global path planner.

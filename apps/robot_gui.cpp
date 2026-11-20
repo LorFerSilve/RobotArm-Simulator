@@ -1,10 +1,14 @@
 #include "robotics/kinematics/ForwardKinematics.hpp"
 #include "robotics/kinematics/SmoothMotion2D.hpp"
+#include "robotics/kinematics/RobotConfiguration2D.hpp"
 #include "robotics/kinematics/Jacobian2D.hpp"
 
 #include <raylib.h>
 
 #include <algorithm>
+#include <array>
+#include <string>
+#include <stdexcept>
 #include <cmath>
 #include <numbers>
 #include <vector>
@@ -14,9 +18,9 @@ namespace {
 using robotics::kinematics::Joint2D;
 using robotics::math::Vec2;
 
-constexpr int initialWidth = 1200;
+constexpr int initialWidth = 1260;
 constexpr int initialHeight = 760;
-constexpr int sidebarWidth = 320;
+constexpr int sidebarWidth = 350;
 constexpr int headerHeight = 62;
 constexpr double fixedDt = 1.0 / 60.0;
 constexpr double radToDeg = 180.0 / std::numbers::pi;
@@ -32,17 +36,33 @@ constexpr Color orange{248, 181, 88, 255};
 constexpr Color green{80, 217, 166, 255};
 constexpr Color red{246, 120, 122, 255};
 
-std::vector<Joint2D> makeArm(int jointCount) {
-    if (jointCount == 3) {
-        return {
-            {1.25, 0.3, 0.0},
-            {0.75, -0.7, 0.0},
-            {1.10, 0.8, 0.0}
-        };
-    }
+using robotics::kinematics::JointDefinition2D;
+using robotics::kinematics::JointLimits2D;
+using robotics::kinematics::Robot2D;
+using robotics::kinematics::makeRobot2D;
+
+constexpr double degToRad = std::numbers::pi / 180.0;
+constexpr std::size_t maxGuiJoints = 6;
+
+JointDefinition2D makeNewLink(bool positiveBranch) {
+    const double margin = 0.16;
+    const double angle = positiveBranch ? 0.85 : -0.85;
+    return {0.7, angle,
+            {positiveBranch ? margin : -std::numbers::pi + margin,
+             positiveBranch ? std::numbers::pi - margin : -margin,
+             2.0, 6.0}};
+}
+
+std::vector<JointDefinition2D> makePreset(int count) {
+    const JointDefinition2D base{2.0, std::numbers::pi / 2.0,
+        {-2.0 * std::numbers::pi, 2.0 * std::numbers::pi, 2.0, 6.0}};
+    const JointDefinition2D elbow{1.0, -std::numbers::pi / 2.0,
+        {-std::numbers::pi + 0.16, -0.16, 2.0, 6.0}};
+    if (count == 2) return {base, elbow};
     return {
-        {2.0, std::numbers::pi / 2.0, 0.0},
-        {1.0, -std::numbers::pi / 2.0, 0.0}
+        {1.25, 0.3, base.limits},
+        {0.75, -0.7, elbow.limits},
+        {1.1, 0.8, {0.16, std::numbers::pi - 0.16, 2.0, 6.0}}
     };
 }
 
@@ -122,15 +142,104 @@ void drawArm(const Viewport& view, const std::vector<Vec2>& positions,
     }
 }
 
+bool button(int x, int y, int w, int h, const char* label,
+            Vector2 mouse, bool pressed, bool enabled = true) {
+    const Rectangle rect{static_cast<float>(x), static_cast<float>(y),
+                         static_cast<float>(w), static_cast<float>(h)};
+    const bool hover = enabled && CheckCollisionPointRec(mouse, rect);
+    DrawRectangleRec(rect, !enabled ? gridColor : hover ? blue : Color{47, 65, 86, 255});
+    const int font = 15;
+    DrawText(label, x + (w - MeasureText(label, font)) / 2,
+             y + (h - font) / 2, font, enabled ? light : muted);
+    return enabled && hover && pressed;
+}
+
+// Editor changes are kept in a draft. Apply creates a validated new robot
+// atomically, so an invalid intermediate edit never damages a live simulation.
+void drawConfigurator(int x, int height, std::vector<JointDefinition2D>& draft,
+                      std::size_t& selected, bool& applyRequested,
+                      std::string& feedback, Vector2 mouse, bool click) {
+    const int left = x + 20;
+    int y = headerHeight + 84;
+    DrawText("ROBOT CONFIGURATION", left, y, 19, light);
+    y += 41;
+    if (button(left, y, 127, 30, "+ ADD JOINT", mouse, click,
+               draft.size() < maxGuiJoints)) {
+        const bool positive = std::signbit(draft.back().initialAngle);
+        draft.push_back(makeNewLink(positive));
+        selected = draft.size() - 1;
+        feedback = "Changes pending: press APPLY";
+    }
+    if (button(left + 142, y, 163, 30, "- REMOVE JOINT", mouse, click,
+               draft.size() > 2)) {
+        draft.pop_back();
+        selected = std::min(selected, draft.size() - 1);
+        feedback = "Changes pending: press APPLY";
+    }
+    y += 43;
+    if (button(left, y, 40, 30, "<", mouse, click, selected > 0)) --selected;
+    DrawText(TextFormat("Joint %d of %d", static_cast<int>(selected + 1),
+                        static_cast<int>(draft.size())), left + 70, y + 6, 17, light);
+    if (button(left + 265, y, 40, 30, ">", mouse, click,
+               selected + 1 < draft.size())) ++selected;
+    y += 48;
+
+    auto& item = draft[selected];
+    const std::array<const char*, 6> labels{
+        "Length (m)", "Initial angle (deg)", "Minimum angle (deg)",
+        "Maximum angle (deg)", "Max speed (deg/s)", "Max accel (deg/s^2)"};
+    const std::array<double, 6> values{
+        item.length, item.initialAngle * radToDeg,
+        item.limits.minAngle * radToDeg, item.limits.maxAngle * radToDeg,
+        item.limits.maxAngularSpeed * radToDeg,
+        item.limits.maxAngularAcceleration * radToDeg};
+    const std::array<double, 6> steps{0.1, 5.0, 5.0, 5.0, 10.0, 20.0};
+
+    for (std::size_t i = 0; i < labels.size(); ++i) {
+        DrawText(labels[i], left, y, 14, muted);
+        DrawText(TextFormat(i == 0 ? "%.2f" : "%.0f", values[i]),
+                 left + 162, y, 16, light);
+        const bool minus = button(left + 233, y - 5, 32, 27, "-", mouse, click);
+        const bool plus = button(left + 273, y - 5, 32, 27, "+", mouse, click);
+        if (minus || plus) {
+            const double change = steps[i] * (plus ? 1.0 : -1.0);
+            switch (i) {
+            case 0: item.length = std::clamp(item.length + change, 0.1, 5.0); break;
+            case 1: item.initialAngle += change * degToRad; break;
+            case 2: item.limits.minAngle += change * degToRad; break;
+            case 3: item.limits.maxAngle += change * degToRad; break;
+            case 4: item.limits.maxAngularSpeed =
+                std::clamp(item.limits.maxAngularSpeed + change * degToRad, 10.0 * degToRad, 6.0); break;
+            case 5: item.limits.maxAngularAcceleration =
+                std::clamp(item.limits.maxAngularAcceleration + change * degToRad, 20.0 * degToRad, 20.0); break;
+            }
+            feedback = "Changes pending: press APPLY";
+        }
+        y += 45;
+    }
+    y += 10;
+    if (button(left, y, 305, 35, "APPLY & RESET ROBOT", mouse, click))
+        applyRequested = true;
+    y += 46;
+    DrawText("Invalid edits are rejected on APPLY.", left, y, 13, muted);
+    y += 23;
+    if (!feedback.empty()) {
+        const std::string line = feedback.substr(0, 41);
+        DrawText(line.c_str(), left, y, 13, feedback.rfind("Error:", 0) == 0 ? red : green);
+        if (feedback.size() > 41 && y + 36 < height)
+            DrawText(feedback.substr(41, 41).c_str(), left, y + 17, 13, red);
+    }
+}
+
 void drawSidebar(int screenWidth, int height, const std::vector<Joint2D>& joints,
                  Vec2 target, Vec2 endEffector, Vec2 tipVelocity,
                  double error, double elapsed, bool paused,
                  bool reached, bool stalled, bool constrained, bool unreachable) {
     const int x = screenWidth - sidebarWidth;
-    DrawRectangle(x, headerHeight, sidebarWidth, height - headerHeight, sidebarColor);
+    DrawRectangle(x, headerHeight + 64, sidebarWidth, height - headerHeight - 64, sidebarColor);
     DrawLine(x, headerHeight, x, height, gridColor);
     const int left = x + 22;
-    int y = headerHeight + 26;
+    int y = headerHeight + 83;
     DrawText("SIMULATION", left, y, 19, light);
     y += 36;
 
@@ -192,14 +301,20 @@ int main() {
     SetTargetFPS(60);
 
     int jointCount = 2;
-    auto joints = makeArm(jointCount);
+    const robotics::kinematics::MotionSettings2D motionSettings{};
+    auto appliedDefinition = makePreset(jointCount);
+    auto draft = appliedDefinition;
+    Robot2D robot = makeRobot2D(appliedDefinition, motionSettings);
+    auto& joints = robot.joints;
+    std::size_t selectedJoint = 0;
+    bool configTab = false;
+    std::string feedback;
     Vec2 target{1.5, 1.5};
     double simulatedTime = 0.0;
     double accumulator = 0.0;
     bool paused = false;
     float zoom = 1.0F;
     MotionStatus2D motionState{};
-    const MotionSettings2D motionSettings{};
 
     while (!WindowShouldClose()) {
         if (IsKeyPressed(KEY_SPACE)) {
@@ -213,9 +328,14 @@ int main() {
         const bool selectTwo = IsKeyPressed(KEY_TWO);
         const bool selectThree = IsKeyPressed(KEY_THREE);
         if (reset || selectTwo || selectThree) {
-            if (selectTwo) jointCount = 2;
-            if (selectThree) jointCount = 3;
-            joints = makeArm(jointCount);
+            if (selectTwo || selectThree) {
+                jointCount = selectThree ? 3 : 2;
+                appliedDefinition = makePreset(jointCount);
+                draft = appliedDefinition;
+                selectedJoint = 0;
+                feedback.clear();
+            }
+            robot = makeRobot2D(appliedDefinition, motionSettings);
             target = {1.5, 1.5};
             simulatedTime = 0.0;
             accumulator = 0.0;
@@ -245,7 +365,8 @@ int main() {
             // Fixed-step control, independent of rendering refresh rate.
             accumulator += std::min(static_cast<double>(GetFrameTime()), 0.1);
             for (int steps = 0; accumulator >= fixedDt && steps < 6; ++steps) {
-                motionState = advanceTowardTarget(joints, target, fixedDt, motionSettings);
+                motionState = advanceTowardTarget(joints, target, fixedDt,
+                                                  motionSettings, robot.limits);
                 simulatedTime += fixedDt;
                 accumulator -= fixedDt;
             }
@@ -281,9 +402,40 @@ int main() {
         DrawRectangle(0, 0, width, headerHeight, background);
         DrawText("ROBOTARM", 23, 16, 25, light);
         DrawText("2D Kinematics Laboratory", 197, 22, 17, muted);
-        drawSidebar(width, height, joints, target, positions.back(), velocity,
-                    error, simulatedTime, paused, reached, stalled,
-                    motionState.constrained, unreachable);
+        const int panelX = width - sidebarWidth;
+        DrawRectangle(panelX, headerHeight, sidebarWidth,
+                      height - headerHeight, sidebarColor);
+        const bool click = IsMouseButtonPressed(MOUSE_BUTTON_LEFT);
+        const Vector2 cursor = GetMousePosition();
+        if (button(panelX + 20, headerHeight + 14, 145, 35, "TELEMETRY",
+                   cursor, click)) configTab = false;
+        if (button(panelX + 182, headerHeight + 14, 148, 35, "CONFIGURE",
+                   cursor, click)) configTab = true;
+        if (configTab) {
+            bool apply = false;
+            drawConfigurator(panelX, height, draft, selectedJoint,
+                             apply, feedback, cursor, click);
+            if (apply) {
+                try {
+                    auto next = makeRobot2D(draft, motionSettings);
+                    robot = std::move(next);
+                    appliedDefinition = draft;
+                    jointCount = static_cast<int>(draft.size());
+                    target = forwardKinematics(joints).back();
+                    simulatedTime = 0.0;
+                    accumulator = 0.0;
+                    paused = true;
+                    motionState = {};
+                    feedback = "Applied. SPACE to move.";
+                } catch (const std::invalid_argument& ex) {
+                    feedback = std::string("Error: ") + ex.what();
+                }
+            }
+        } else {
+            drawSidebar(width, height, joints, target, positions.back(), velocity,
+                        error, simulatedTime, paused, reached, stalled,
+                        motionState.constrained, unreachable);
+        }
         EndDrawing();
     }
 

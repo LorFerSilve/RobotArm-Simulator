@@ -15,6 +15,7 @@ add_library(robotics_core STATIC
     src/Jacobian2D.cpp
     src/InverseKinematics2D.cpp
     src/SmoothMotion2D.cpp
+    src/RobotConfiguration2D.cpp
 )
 
 target_include_directories(robotics_core PUBLIC
@@ -65,3 +66,11 @@ add_test(NAME InverseKinematics2D COMMAND test_inverse_kinematics)
 add_executable(test_smooth_motion tests/test_smooth_motion.cpp)
 target_link_libraries(test_smooth_motion PRIVATE robotics_core)
 add_test(NAME SmoothMotion2D COMMAND test_smooth_motion)
+
+add_executable(test_robot_configuration tests/test_robot_configuration.cpp)
+target_link_libraries(test_robot_configuration PRIVATE robotics_core)
+add_test(NAME RobotConfiguration2D COMMAND test_robot_configuration)
+
+add_executable(test_joint_limits tests/test_joint_limits.cpp)
+target_link_libraries(test_joint_limits PRIVATE robotics_core)
+add_test(NAME JointLimits2D COMMAND test_joint_limits)
