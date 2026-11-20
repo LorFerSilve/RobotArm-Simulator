@@ -272,3 +272,19 @@ The [GitHub Actions CI workflow](.github/workflows/ci.yml) is configured
 to build and run the suite on every push and pull request on Linux and
 Windows (the latter also compiles the raylib GUI). Local visual playtesting
 is still needed for GUI behavior and complex trajectories.
+
+## Release acceptance tests (2–7 joints)
+
+The new `ReleaseMotionMatrix` (120 motions) and
+`ReleaseMotionStress` (600 motions) run on the **actual path planner and
+frame-by-frame follower**. Every case contains the positions of the base
+and all joints at the start plus the required target. Link lengths and
+relative angles are recovered from these positions, so arrival is judged
+**only by end-effector position**, never by a predetermined final posture.
+All cases are deterministic and independently verified reachable before
+being accepted into the mandatory set. All unsafe motion or failure to
+reach a required target fails the test.
+
+See [the six-group scenario specification](docs/MOTION_SCENARIOS.md).
+Seven joints are covered by the engine tests even though the current GUI
+editor stops at six.

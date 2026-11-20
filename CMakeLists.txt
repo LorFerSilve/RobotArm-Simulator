@@ -100,3 +100,11 @@ add_test(NAME FiveJointRecovery2D COMMAND test_five_joint_recovery)
 add_executable(test_motion_scenarios tests/test_motion_scenarios.cpp)
 target_link_libraries(test_motion_scenarios PRIVATE robotics_core)
 add_test(NAME MotionScenarioMatrix COMMAND test_motion_scenarios)
+
+# Release-grade transitions: six groups (2..7 joints), Cartesian start states
+# and targets. The stress test executes 600 independently witnessed motions.
+add_executable(test_release_motions tests/test_release_motions.cpp)
+target_link_libraries(test_release_motions PRIVATE robotics_core)
+add_test(NAME ReleaseMotionMatrix COMMAND test_release_motions)
+add_test(NAME ReleaseMotionStress COMMAND test_release_motions --stress)
+set_tests_properties(ReleaseMotionStress PROPERTIES LABELS "stress;release" TIMEOUT 600)
