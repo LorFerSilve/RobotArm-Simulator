@@ -122,10 +122,19 @@ std::vector<double> targetLinkPenetrations(std::span<const math::Vec2> positions
     const bool toolNearTarget = (target - positions.back()).length() <=
                                 2.0 * clearance;
     for (std::size_t i = 0; i < depths.size(); ++i) {
-        // Only the final link gets the tool-tip allowance.
-        if (i == last && toolNearTarget) continue;
-        const double distance = pointDistance(target, positions[i],
-                                               positions[i + 1]);
+        auto shaftEnd = positions[i + 1];
+
+        // The tool is at the very end of the final link, not the whole link.
+        // When the tip approaches the target, only its short terminal portion
+        // may enter the target disk; the remaining shaft is always protected.
+        if (i == last && toolNearTarget) {
+            const auto shaft = positions[i + 1] - positions[i];
+            const double length = shaft.length();
+            const double toolLength = std::min(2.0 * clearance, 0.4 * length);
+            shaftEnd = positions[i] + shaft * ((length - toolLength) / length);
+        }
+
+        const double distance = pointDistance(target, positions[i], shaftEnd);
         depths[i] = std::max(0.0, clearance - distance);
     }
     return depths;

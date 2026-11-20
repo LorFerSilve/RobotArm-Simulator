@@ -82,6 +82,23 @@ the simulator grows. See the root README for build and usage instructions.
       clearance constraints where the bounded search still cannot find a
       feasible detour. Do not solve this by relaxing collision constraints.
 
+## Permanent motion regression policy
+
+- [x] Add `tests/test_motion_scenarios.cpp` with explicit start/destination
+      pairs and reproducible joint configurations.
+- [x] Add `docs/MOTION_SCENARIOS.md` describing the scenario fixtures and
+      how to extend them.
+- [x] Add Linux/Windows GitHub Actions build-and-CTest checks.
+- [x] Prevent an entire last link from being exempted when the tip nears a
+      target; retain only a short end-effector tool allowance.
+- [x] Increase target sampling in planned joint-space edges where a large
+      Cartesian sweep could cross the target between angular samples.
+- [ ] Record the **exact joint angles** from the latest multi-joint
+      screenshot and promote that case to a required regression.
+- [ ] Implement certified swept-volume collision checking for target and
+      future scene obstacles; the current planner uses conservative sampling,
+      not exact continuous collision detection.
+
 ## Playtest issues to keep visible
 
 0a. **Two-joint target blocks shortest shoulder rotation**: a direct

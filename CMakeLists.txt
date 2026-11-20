@@ -95,3 +95,8 @@ add_test(NAME TwoJointDetour2D COMMAND test_two_joint_detour)
 add_executable(test_five_joint_recovery tests/test_five_joint_recovery.cpp)
 target_link_libraries(test_five_joint_recovery PRIVATE robotics_core)
 add_test(NAME FiveJointRecovery2D COMMAND test_five_joint_recovery)
+
+# Position-pair transition matrix; validates planning AND executed frame motion.
+add_executable(test_motion_scenarios tests/test_motion_scenarios.cpp)
+target_link_libraries(test_motion_scenarios PRIVATE robotics_core)
+add_test(NAME MotionScenarioMatrix COMMAND test_motion_scenarios)

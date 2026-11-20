@@ -83,6 +83,21 @@ struct SearchContext {
         return true;
     }
 
+    // Distance to the entire arm, including its tool, used only to prove
+    // that a portion of the path is too far away to hit the target.
+    [[nodiscard]] double nearestLinkDistance(const Angles& q) const {
+        const auto points = positions(q);
+        double best = std::numeric_limits<double>::infinity();
+        for (std::size_t i = 1; i < points.size(); ++i) {
+            const auto ab = points[i] - points[i - 1];
+            const double length2 = ab.dot(ab);
+            const double t = length2 > 0.0 ? std::clamp(
+                (target - points[i - 1]).dot(ab) / length2, 0.0, 1.0) : 0.0;
+            best = std::min(best, (target - (points[i - 1] + ab * t)).length());
+        }
+        return best;
+    }
+
     // A *physical* path must keep the target safe. If a newly selected target
     // is already touching a link, allow a retreat only while penetration
     // decreases monotonically for every link (never introduce new contact).
@@ -95,17 +110,48 @@ struct SearchContext {
         for (std::size_t i = 0; i < a.size(); ++i)
             maxDelta = std::max(maxDelta, std::abs(a[i] - b[i]));
         const auto steps = std::max(1, static_cast<int>(std::ceil(maxDelta / edgeResolution)));
+        Angles from = a;
+        Angles to(a.size());
         Angles q(a.size());
+
         for (int step = 1; step <= steps; ++step) {
             const double alpha = static_cast<double>(step) / steps;
             for (std::size_t i = 0; i < q.size(); ++i)
-                q[i] = a[i] + alpha * (b[i] - a[i]);
-            if (!validRobot(q)) return false;
-            const auto next = targetLinkPenetrations(positions(q), target,
-                                                     settings.targetClearance);
-            for (std::size_t i = 0; i < next.size(); ++i)
-                if (next[i] > previous[i] + 1e-9) return false;
-            previous = next;
+                to[i] = a[i] + alpha * (b[i] - a[i]);
+            if (!validRobot(to)) return false;
+
+            // An angular step of 0.04 rad can move the end of a long
+            // multi-link arm by much more than the 0.16 m target diameter.
+            // Bound the travel of any point on the arm using downstream
+            // link lengths. Only subdivide further when contact is possible.
+            int checks = 1;
+            if (settings.targetClearance > 0.0) {
+                double downstream = 0.0;
+                double maximumTravel = 0.0;
+                for (std::size_t i = q.size(); i-- > 0;) {
+                    downstream += joints[i].length;
+                    maximumTravel += downstream * std::abs(to[i] - from[i]);
+                }
+                if (nearestLinkDistance(from) <=
+                    settings.targetClearance + maximumTravel) {
+                    const double maxTravelPerCheck =
+                        std::max(0.02, settings.targetClearance * 0.4);
+                    checks = std::max(1, static_cast<int>(
+                        std::ceil(maximumTravel / maxTravelPerCheck)));
+                }
+            }
+            for (int sub = 1; sub <= checks; ++sub) {
+                const double fraction = static_cast<double>(sub) / checks;
+                for (std::size_t i = 0; i < q.size(); ++i)
+                    q[i] = from[i] + fraction * (to[i] - from[i]);
+                if (!validRobot(q)) return false;
+                const auto next = targetLinkPenetrations(positions(q), target,
+                                                         settings.targetClearance);
+                for (std::size_t i = 0; i < next.size(); ++i)
+                    if (next[i] > previous[i] + 1e-9) return false;
+                previous = next;
+            }
+            from = to;
         }
         return true;
     }

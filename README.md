@@ -9,7 +9,7 @@ A modular C++20 robotic arm simulator featuring custom kinematics, Jacobian-base
 - Analytic 2 x N Jacobian, Cartesian end-effector velocity, and 2-joint determinant.
 - Custom damped least-squares inverse kinematics, velocity limiting, and target tolerance.
 - Collision-aware GUI motion: analytic two-link IK with a stable elbow branch, angular speed/acceleration caps, joint clearance, nonadjacent-link collision checks, and extra target-object/folding safeguards.
-- CLI frame telemetry and thirteen automatic tests using CTest.
+- CLI frame telemetry and fourteen automatic tests using CTest.
 - Interactive 2D GUI, using raylib **only** for display and input: target selection by mouse, real-time telemetry, pause/reset, grid and zoom.
 - **Configurable robot arm (Phase 1):** edit 2–6 joints, each link's length and initial relative angle, per-joint rotation range, maximum speed, and maximum acceleration in the GUI.
 
@@ -245,3 +245,30 @@ joint ranges, speed limits and acceleration limits.
 than using continuous corner-blending. New goals chosen while a robot is
 still moving are not yet handled by a full velocity-continuous replanner.
 See `docs/ROADMAP.md`.
+
+## Permanent movement regression suite
+
+The table in [docs/MOTION_SCENARIOS.md](docs/MOTION_SCENARIOS.md) collects
+reproducible **(start position, destination position)** transitions,
+together with joint poses, robot geometry and constraints. The automated
+`MotionScenarioMatrix` test runs the actual controller frame by frame, not
+merely the IK solver. The table includes the reported multi-joint
+`(~4,-9) -> (-3,-4)` scenario and additional pairs such as
+`(1,0) -> (0,1)` and `(2,3) -> (5,4)`.
+
+Each known-reachable case must arrive without self-collisions, target
+penetration, joint-limit violations or excess joint acceleration/speed.
+Exploratory cases may report that the bounded planner did not find a route,
+but may never execute an unsafe route. New playtest failures should be
+added as explicit fixtures before being considered fixed.
+
+Target protection no longer exempts the entire final link near the goal.
+Only a short end-effector tool zone may approach the target object; the
+remaining last-link shaft is tested for contact. Joint-space edges also
+use more detailed target checks when their possible Cartesian displacement
+could skip over the small target safety zone.
+
+The [GitHub Actions CI workflow](.github/workflows/ci.yml) is configured
+to build and run the suite on every push and pull request on Linux and
+Windows (the latter also compiles the raylib GUI). Local visual playtesting
+is still needed for GUI behavior and complex trajectories.

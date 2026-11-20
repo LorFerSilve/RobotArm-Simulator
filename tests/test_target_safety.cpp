@@ -24,6 +24,20 @@ int main() {
         require(targetApproachClear(
             std::vector<Vec2>{{0, 0}, {0, 2}, {2, 2}}, {2, 2}, 0.16),
             "Allow end-effector arrival");
+        // Regression: the old implementation exempted the ENTIRE last
+        // segment as soon as the tip was within 2*clearance of the target.
+        // That let the shaft cut across the object before the tip arrived.
+        require(!targetApproachClear(
+            std::vector<Vec2>{{0, 0}, {2, 0}, {4, 0}}, {3.7, 0}, 0.16),
+            "Last-link shaft must stay out of target near the tip");
+        require(targetApproachClear(
+            std::vector<Vec2>{{0, 0}, {2, 0}, {4, 0}}, {3.95, 0}, 0.16),
+            "A short tool tip may approach the target");
+        const auto closeShaft = targetLinkPenetrations(
+            std::vector<Vec2>{{0, 0}, {2, 0}, {4, 0}}, {3.7, 0}, 0.16);
+        require(closeShaft.back() > 0.0,
+                "Target penetration must report last-link shaft contact");
+
         require(targetApproachClear(
             std::vector<Vec2>{{0, 0}, {0, 2}, {2, 2}}, {-1, 2}, 0.16),
             "Allow unobstructed poses");
