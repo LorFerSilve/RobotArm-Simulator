@@ -9,7 +9,7 @@ A modular C++20 robotic arm simulator featuring custom kinematics, Jacobian-base
 - Analytic 2 x N Jacobian, Cartesian end-effector velocity, and 2-joint determinant.
 - Custom damped least-squares inverse kinematics, velocity limiting, and target tolerance.
 - Collision-aware GUI motion: analytic two-link IK with a stable elbow branch, angular speed/acceleration caps, joint clearance, nonadjacent-link collision checks, and extra target-object/folding safeguards.
-- CLI frame telemetry and ten automatic tests using CTest.
+- CLI frame telemetry and eleven automatic tests using CTest.
 - Interactive 2D GUI, using raylib **only** for display and input: target selection by mouse, real-time telemetry, pause/reset, grid and zoom.
 - **Configurable robot arm (Phase 1):** edit 2–6 joints, each link's length and initial relative angle, per-joint rotation range, maximum speed, and maximum acceleration in the GUI.
 
@@ -150,8 +150,10 @@ against all upstream arm links. The last link is allowed into a short
 tool-tip zone of twice that radius so that the end effector can arrive.
 This is an intentionally simplified contact model, not a rigid-body
 simulation with detailed gripper geometry or object collision shapes.
-If the target is already underneath an intermediate link, a new 3+ joint
-plan fails safely instead of trying to push the arm through the object.
+If the target is already underneath an intermediate link, the planner
+now looks for a **safe retreat** that reduces the existing contact before
+continuing toward a collision-free final pose. It does not drive any link
+deeper into the newly selected target.
 
 The GUI also uses a tighter **fold margin of 0.55 rad** (about 31.5 degrees)
 from the fully folded, overlapping pose. Its joint presets and configurator
@@ -167,3 +169,28 @@ breaking existing CLI scenarios. Configure the new margins using
 In particular, **NO SAFE PATH FOUND** can mean that a goal is excluded by
 the target/arm safety envelopes, or that the bounded search did not find a
 valid path. The GUI does not yet guarantee a detour for every feasible goal.
+
+## Target-aware recovery planning (playtest fix)
+
+The configuration-space planner now distinguishes two different operations:
+
+1. **Finding inverse-kinematics solutions** is a mathematical search, not a
+   physical trajectory. Constrained IK can explore intermediate joint poses
+   that would overlap the target object, but a *final* candidate is only
+   accepted if all arm-link and target clearances are satisfied.
+2. **Executing the joint-space path** must remain safe. Every interpolated
+   path edge and every follower step checks collision. If the target was
+   selected beneath an already occupied arm segment, the only permitted
+   escape motion is one that never increases that segment's target
+   penetration and never creates contact with another segment.
+
+This removes an overly restrictive check that discarded feasible targets
+while searching for a goal pose. It also allows the robot to **move away
+first, then approach the target from a safe direction**, when the bounded
+planner can find such a path. A target overlapping the immovable base
+cannot be cleared and is rejected.
+
+The new regression tests cover both a collision-prone straight-line route
+and the safe retreat from a target initially under arm segments. As before,
+a bounded RRT search can still fail to find some feasible paths, so
+`NO SAFE PATH FOUND` never proves that the position is impossible.

@@ -107,26 +107,35 @@ std::vector<double> analyticTwoLinkPose(std::span<const Joint2D> joints,
 
 } // namespace
 
-bool targetApproachClear(std::span<const math::Vec2> positions,
-                         math::Vec2 target, double clearance) {
+std::vector<double> targetLinkPenetrations(std::span<const math::Vec2> positions,
+                                           math::Vec2 target, double clearance) {
     if (positions.size() < 2 || !finite(target) || !std::isfinite(clearance) ||
         clearance < 0.0)
         throw std::invalid_argument("Invalid target approach geometry");
-    if (clearance == 0.0) return true;
     for (const auto& point : positions)
         if (!finite(point)) throw std::invalid_argument("Invalid arm point");
 
-    // The target is a physical object: every segment except the last must
-    // remain outside its clearance disk.
-    for (std::size_t i = 1; i + 1 < positions.size(); ++i) {
-        if (pointDistance(target, positions[i - 1], positions[i]) <= clearance)
-            return false;
+    std::vector<double> depths(positions.size() - 1, 0.0);
+    if (clearance == 0.0) return depths;
+
+    const std::size_t last = depths.size() - 1;
+    const bool toolNearTarget = (target - positions.back()).length() <=
+                                2.0 * clearance;
+    for (std::size_t i = 0; i < depths.size(); ++i) {
+        // Only the final link gets the tool-tip allowance.
+        if (i == last && toolNearTarget) continue;
+        const double distance = pointDistance(target, positions[i],
+                                               positions[i + 1]);
+        depths[i] = std::max(0.0, clearance - distance);
     }
-    // The last small zone surrounding the end effector acts as the tool.
-    // Do not allow the body of the last link to touch the target earlier.
-    return !(pointDistance(target, positions[positions.size() - 2],
-                           positions.back()) <= clearance &&
-             (target - positions.back()).length() > 2.0 * clearance);
+    return depths;
+}
+
+bool targetApproachClear(std::span<const math::Vec2> positions,
+                         math::Vec2 target, double clearance) {
+    const auto depths = targetLinkPenetrations(positions, target, clearance);
+    return std::all_of(depths.begin(), depths.end(),
+                       [](double depth) { return depth == 0.0; });
 }
 
 bool hasSelfCollision(std::span<const math::Vec2> positions, double clearance) {

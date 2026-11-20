@@ -82,10 +82,11 @@ int main() {
         }
         require(reached, "Follower reaches goal without touching intermediate links");
 
-        const auto positions = forwardKinematics(arm);
-        const Vec2 linkTarget = positions[0] + (positions[1] - positions[0]) * 0.5;
-        const auto unsafe = planJointPath2D(arm, limits, linkTarget, options);
-        require(!unsafe.found(), "Target placed on a link should fail safely");
+        // The fixed base cannot move out of a physical target. This is
+        // fundamentally different from contact along a movable arm link,
+        // which may be resolved by a safe retreat and reconfiguration.
+        const auto impossible = planJointPath2D(arm, limits, {0.0, 0.0}, options);
+        require(!impossible.found(), "Target covering the fixed base is impossible");
 
         auto folded = arm;
         folded[1].angle = -pi + 0.2;

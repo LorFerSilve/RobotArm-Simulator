@@ -65,7 +65,10 @@ struct SearchContext {
                targetApproachClear(positions(q), target, settings.targetClearance);
     }
 
-    [[nodiscard]] bool edge(const Angles& a, const Angles& b) const {
+    // Only a geometric IK search: its intermediate iterations are not real
+    // robot movements, so the target-object keep-out zone is not imposed here.
+    [[nodiscard]] bool edgeRobot(const Angles& a, const Angles& b) const {
+        if (!validRobot(a)) return false;
         double maxDelta = 0.0;
         for (std::size_t i = 0; i < a.size(); ++i)
             maxDelta = std::max(maxDelta, std::abs(a[i] - b[i]));
@@ -75,7 +78,34 @@ struct SearchContext {
             const double alpha = static_cast<double>(step) / steps;
             for (std::size_t i = 0; i < q.size(); ++i)
                 q[i] = a[i] + alpha * (b[i] - a[i]);
-            if (!valid(q)) return false;
+            if (!validRobot(q)) return false;
+        }
+        return true;
+    }
+
+    // A *physical* path must keep the target safe. If a newly selected target
+    // is already touching a link, allow a retreat only while penetration
+    // decreases monotonically for every link (never introduce new contact).
+    // Once outside the keep-out zone, re-entry is forbidden.
+    [[nodiscard]] bool edge(const Angles& a, const Angles& b) const {
+        if (!validRobot(a)) return false;
+        auto previous = targetLinkPenetrations(positions(a), target,
+                                                settings.targetClearance);
+        double maxDelta = 0.0;
+        for (std::size_t i = 0; i < a.size(); ++i)
+            maxDelta = std::max(maxDelta, std::abs(a[i] - b[i]));
+        const auto steps = std::max(1, static_cast<int>(std::ceil(maxDelta / edgeResolution)));
+        Angles q(a.size());
+        for (int step = 1; step <= steps; ++step) {
+            const double alpha = static_cast<double>(step) / steps;
+            for (std::size_t i = 0; i < q.size(); ++i)
+                q[i] = a[i] + alpha * (b[i] - a[i]);
+            if (!validRobot(q)) return false;
+            const auto next = targetLinkPenetrations(positions(q), target,
+                                                     settings.targetClearance);
+            for (std::size_t i = 0; i < next.size(); ++i)
+                if (next[i] > previous[i] + 1e-9) return false;
+            previous = next;
         }
         return true;
     }
@@ -96,7 +126,7 @@ double distanceSquared(const Angles& a, const Angles& b) {
         const auto positions = c.positions(q);
         const auto e = target - positions.back();
         const double error = e.length();
-        if (error <= c.settings.positionTolerance) return true;
+        if (error <= c.settings.positionTolerance) return c.valid(q);
         const auto jacobian = endEffectorJacobian(positions);
 
         // Exclude columns that can only move farther outside a saturated bound.
@@ -125,7 +155,7 @@ double distanceSquared(const Angles& a, const Angles& b) {
             for (std::size_t i = 0; i < q.size(); ++i)
                 next[i] = std::clamp(q[i] + alpha * direction[i],
                                      c.limits[i].minAngle, c.limits[i].maxAngle);
-            if (!c.edge(q, next)) continue;
+            if (!c.edgeRobot(q, next)) continue;
             const double nextError = (target - c.positions(next).back()).length();
             if (nextError < error - 1e-9) {
                 q = std::move(next);
@@ -270,15 +300,19 @@ PlannedJointPath2D planJointPath2D(std::span<const Joint2D> joints,
     validate(c, target);
     const Angles start = c.angles();
     PlannedJointPath2D output;
-    if (!c.valid(start)) return output; // Target already intersects the arm.
+    // An already contacted target needs an escape path, not an immediate failure.
     output.terminalError = (target - c.positions(start).back()).length();
-    if (output.terminalError <= settings.positionTolerance) {
+    if (output.terminalError <= settings.positionTolerance && c.valid(start)) {
         output.waypoints = {start};
         return output;
     }
     double reach = 0.0;
     for (const auto& joint : joints) reach += joint.length;
     if (target.length() > reach + settings.positionTolerance) return output;
+    // The base is fixed at the origin; a target containing the base can
+    // never be cleared by the first link, regardless of reconfiguration.
+    if (settings.targetClearance > 0.0 &&
+        target.length() < settings.targetClearance) return output;
 
     std::mt19937 rng{0x526f626fU};
     // Prioritize the original configuration; use other sampled joint states
@@ -295,7 +329,7 @@ PlannedJointPath2D planJointPath2D(std::span<const Joint2D> joints,
                 seed[i] = std::uniform_real_distribution<double>(low, high)(rng);
             }
         }
-        if (!c.valid(seed) || !refineIK(c, seed, target)) continue;
+        if (!c.validRobot(seed) || !refineIK(c, seed, target)) continue;
         const auto path = connectPath(c, start, seed, rng);
         if (path.empty()) continue;
         output.waypoints = shorten(c, path);

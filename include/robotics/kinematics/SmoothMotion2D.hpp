@@ -4,6 +4,7 @@
 #include "robotics/math/Vec2.hpp"
 
 #include <span>
+#include <vector>
 
 namespace robotics::kinematics {
 
@@ -42,6 +43,12 @@ struct MotionStatus2D {
     std::span<Joint2D> joints, math::Vec2 target, double dt,
     const MotionSettings2D& settings = {},
     std::span<const JointLimits2D> limits = {});
+
+// Per-link penetration depth into the target keep-out zone (metres).
+// Zero means that link does not penetrate the protected zone. For the last
+// link, the tool-tip allowance is accounted for here.
+[[nodiscard]] std::vector<double> targetLinkPenetrations(
+    std::span<const math::Vec2> positions, math::Vec2 target, double clearance);
 
 // The target represents a small physical object. Links except the tool-end
 // must keep clearance; the final link can approach within the tool-tip zone.

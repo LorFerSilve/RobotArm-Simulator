@@ -83,3 +83,7 @@ add_test(NAME PathPlanning2D COMMAND test_path_planning)
 add_executable(test_target_safety tests/test_target_safety.cpp)
 target_link_libraries(test_target_safety PRIVATE robotics_core)
 add_test(NAME TargetSafety2D COMMAND test_target_safety)
+
+add_executable(test_target_recovery tests/test_target_recovery.cpp)
+target_link_libraries(test_target_recovery PRIVATE robotics_core)
+add_test(NAME TargetRecovery2D COMMAND test_target_recovery)

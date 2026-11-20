@@ -61,12 +61,21 @@ the simulator grows. See the root README for build and usage instructions.
 - [ ] **Target-object geometry:** replace the current target-circle/tool-tip
       approximation with user-configurable object sizes, tool geometry,
       continuous swept-volume collision checks, and approach direction.
-- [ ] **Safety-aware replanning:** if the target is underneath the current
-      arm or the selected elbow branch cannot reach it safely, report an
-      actionable blocked state and search more configuration-space alternatives.
-      Do not solve this by relaxing collision constraints.
+- [x] **Target-under-arm recovery (initial implementation):** multi-start IK
+      can search through virtual configurations without requiring its internal
+      iterations to be target-clear; a real planned route may safely retreat
+      from contact that existed when the target was selected.
+- [ ] **Further safety-aware replanning:** handle difficult joint-branch or
+      clearance constraints where the bounded search still cannot find a
+      feasible detour. Do not solve this by relaxing collision constraints.
 
 ## Playtest issues to keep visible
+
+0. **Premature failure when an arm could avoid the target:** previously, every
+   IK *iteration* was required to stay target-clear, even though these virtual
+   calculations are never executed. Also, selecting a target already under a
+   link failed immediately. Fixed by separating goal search from safe path
+   checks and allowing a contact-reducing retreat; continue testing 3–6 joints.
 
 1. **Redundant-arm apparent freeze**: the earlier 3+ joint controller repeatedly
    halved a DLS velocity at joint limits/self-collisions, sometimes resulting in
