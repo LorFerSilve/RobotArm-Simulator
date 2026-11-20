@@ -9,7 +9,7 @@ A modular C++20 robotic arm simulator featuring custom kinematics, Jacobian-base
 - Analytic 2 x N Jacobian, Cartesian end-effector velocity, and 2-joint determinant.
 - Custom damped least-squares inverse kinematics, velocity limiting, and target tolerance.
 - Collision-aware GUI motion: analytic two-link IK with a stable elbow branch, angular speed/acceleration caps, joint clearance, nonadjacent-link collision checks, and extra target-object/folding safeguards.
-- CLI frame telemetry and twelve automatic tests using CTest.
+- CLI frame telemetry and thirteen automatic tests using CTest.
 - Interactive 2D GUI, using raylib **only** for display and input: target selection by mouse, real-time telemetry, pause/reset, grid and zoom.
 - **Configurable robot arm (Phase 1):** edit 2–6 joints, each link's length and initial relative angle, per-joint rotation range, maximum speed, and maximum acceleration in the GUI.
 
@@ -55,6 +55,8 @@ The GUI uses 60 Hz fixed-step simulation and a 60 FPS rendering target. Renderin
 | `R` | Reset to initial pose and target |
 | `2` | Two-joint robot preset |
 | `3` | Three-joint robot preset |
+| `4` | Four-joint robot preset (2 m per link) |
+| `5` | Five-joint robot preset (2 m per link, starting tip near `(4,-9)`) |
 | Mouse wheel over canvas | Zoom |
 | `CONFIGURE` tab | Edit a draft robot configuration |
 | `+ ADD JOINT` / `- REMOVE JOINT` | Change the link count (2–6) |
@@ -126,8 +128,7 @@ violates the configured joint limits. Edges are collision-checked at a maximum
 angular interpolation step of 0.04 radians; path segments are then shortened
 when a direct shortcut remains safe.
 
-The GUI follows the resulting joint waypoints with per-joint acceleration and
-speed limits. To avoid running an expensive search every rendering frame, a
+The GUI follows the resulting joint waypoints using a **single coordinated quintic interpolation parameter** per segment, bounded by each joint's velocity and acceleration limits. To avoid running an expensive search every rendering frame, a
 new target is committed when the user **releases the mouse button**. The
 2-joint arm keeps the previously tested smooth analytic controller.
 
@@ -215,3 +216,32 @@ A route involving an extra revolution is only accepted if the configured
 shoulder rotation range actually permits it. The planner does not silently
 cross joint limits, reverse the elbow branch, or relax target collision
 constraints. Target planning runs when the mouse button is released.
+
+## Five-joint waypoint follower and test presets
+
+**Playtest issue:** a planned route was geometrically valid but the robot
+sometimes stopped near a target when its separate per-joint speed controllers
+made the executed movement deviate from the checked straight-line segment
+in joint space. The `PlannedMotion2D` follower now uses a shared **quintic
+smoothstep** progress parameter for all joints along each approved segment.
+The segment's duration is chosen to respect the strictest joint speed and
+acceleration limit; each segment starts and finishes at rest. This removes
+the independent joint-space corner cutting that caused unexpected contact
+and blocked states. The planner and target/arm collision checks remain active.
+
+The GUI also supports preset hotkeys **2**, **3**, **4**, and **5**.
+Presets 4 and 5 have 2 m links and alternating safe elbow branches.
+Preset 5 starts with its end effector near `(4,-9)`; try selecting target
+`(-3,-4)` to reproduce the reported five-joint playtest.
+The initial target for presets 4/5 is set to the current tip, so the arm
+starts at rest until you click a new target. Press **R** to reset the
+currently selected configuration.
+
+The `FiveJointRecovery2D` CTest regression checks the planned path,
+the actual time-stepped follower, target/link separation, self-collisions,
+joint ranges, speed limits and acceleration limits.
+
+**Known limitation:** planned paths stop at intermediate waypoints, rather
+than using continuous corner-blending. New goals chosen while a robot is
+still moving are not yet handled by a full velocity-continuous replanner.
+See `docs/ROADMAP.md`.

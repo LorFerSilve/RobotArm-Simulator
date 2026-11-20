@@ -61,11 +61,26 @@ std::vector<JointDefinition2D> makePreset(int count) {
     const JointDefinition2D elbow{1.0, -std::numbers::pi / 2.0,
         {-std::numbers::pi + 0.56, -0.16, 2.0, 6.0}};
     if (count == 2) return {base, elbow};
-    return {
-        {1.25, 0.3, base.limits},
-        {0.75, -0.7, elbow.limits},
-        {1.1, 0.8, {0.16, std::numbers::pi - 0.56, 2.0, 6.0}}
+    if (count == 3) {
+        return {
+            {1.25, 0.3, base.limits},
+            {0.75, -0.7, elbow.limits},
+            {1.1, 0.8, {0.16, std::numbers::pi - 0.56, 2.0, 6.0}}
+        };
+    }
+    // Four/five-link presets: an unfolded, collision-free arm with 2 m
+    // links. The five-link tip starts near (4, -9), useful for regression
+    // tests of recovery toward (-3, -4).
+    constexpr double radians = std::numbers::pi / 180.0;
+    const JointLimits2D positive{0.16, std::numbers::pi - 0.56, 2.0, 6.0};
+    std::vector<JointDefinition2D> result{
+        {2.0, -57.0 * radians, base.limits},
+        {2.0, -21.0 * radians, elbow.limits},
+        {2.0, 26.0 * radians, positive},
+        {2.0, -35.0 * radians, elbow.limits}
     };
+    if (count == 5) result.push_back({2.0, 32.0 * radians, positive});
+    return result;
 }
 
 struct Viewport {
@@ -339,16 +354,19 @@ int main() {
         const bool reset = IsKeyPressed(KEY_R);
         const bool selectTwo = IsKeyPressed(KEY_TWO);
         const bool selectThree = IsKeyPressed(KEY_THREE);
-        if (reset || selectTwo || selectThree) {
-            if (selectTwo || selectThree) {
-                jointCount = selectThree ? 3 : 2;
+        const bool selectFour = IsKeyPressed(KEY_FOUR);
+        const bool selectFive = IsKeyPressed(KEY_FIVE);
+        if (reset || selectTwo || selectThree || selectFour || selectFive) {
+            if (selectTwo || selectThree || selectFour || selectFive) {
+                jointCount = selectFive ? 5 : selectFour ? 4 : selectThree ? 3 : 2;
                 appliedDefinition = makePreset(jointCount);
                 draft = appliedDefinition;
                 selectedJoint = 0;
                 feedback.clear();
             }
             robot = makeRobot2D(appliedDefinition, motionSettings);
-            target = {1.5, 1.5};
+            target = jointCount >= 4 ? forwardKinematics(joints).back() :
+                                          Vec2{1.5, 1.5};
             simulatedTime = 0.0;
             accumulator = 0.0;
             paused = false;
@@ -434,7 +452,7 @@ int main() {
         drawArm(viewport, positions, target,
                 !unreachable && !(!draggingTarget && plannedMotion.searchFailed()));
         EndScissorMode();
-        DrawText("CLICK/DRAG Target (release to plan 2+)   SPACE Pause   R Reset   WHEEL Zoom",
+        DrawText("CLICK/DRAG Target   SPACE Pause   R Reset   2-5 Presets   WHEEL Zoom",
                  20, height - 28, 15, muted);
         DrawRectangle(0, 0, width, headerHeight, background);
         DrawText("ROBOTARM", 23, 16, 25, light);

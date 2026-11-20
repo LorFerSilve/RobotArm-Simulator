@@ -16,6 +16,12 @@ the simulator grows. See the root README for build and usage instructions.
 - [x] **Two-joint safe detours:** enumerate periodic closed-form IK solutions,
       check opposite-direction shoulder rotations, and plan joint-space
       paths for both two-joint and redundant arms.
+- [x] **Five-joint follower correction:** use one time parameter per
+      collision-checked joint-space segment rather than separate joint
+      controllers that cut corners; add a 5-joint (4,-9) to (-3,-4)
+      playtest regression.
+- [x] **Test-friendly presets:** add keyboard shortcuts 4/5 to the
+      existing 2/3 presets.
 
 ## Outstanding work, in intended order
 
@@ -33,8 +39,12 @@ the simulator grows. See the root README for build and usage instructions.
       no IK goal, exhausted sample budget, collision, or limited workspace.
 - [ ] Move planning off the GUI rendering thread and support cancellation when
       the target/robot/obstacles change.
-- [ ] Replace stop-and-go waypoint following with continuous, time-parameterized
-      jerk-aware trajectories while preserving collision clearance.
+- [ ] Replace stop-at-waypoint quintic interpolation with continuous,
+      corner-blended, jerk-aware trajectories while preserving collision
+      clearance. The current coordinated follower is safe but briefly
+      stops at intermediate waypoints.
+- [ ] Preserve joint velocity/acceleration continuity across target changes
+      while the previous plan is still executing.
 - [ ] Support controlled reconfiguration when feasible (including elbow-branch
       transitions in a future joint/geometry model).
 - [ ] Add replanning and safe stopping around moving obstacles.

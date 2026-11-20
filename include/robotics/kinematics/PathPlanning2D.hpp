@@ -47,6 +47,8 @@ public:
 private:
     std::vector<std::vector<double>> path_;
     std::size_t index_{};
+    double segmentElapsed_{};
+    double segmentDuration_{};
     math::Vec2 target_{};
     bool hasTarget_{};
     bool failed_{};

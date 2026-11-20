@@ -91,3 +91,7 @@ add_test(NAME TargetRecovery2D COMMAND test_target_recovery)
 add_executable(test_two_joint_detour tests/test_two_joint_detour.cpp)
 target_link_libraries(test_two_joint_detour PRIVATE robotics_core)
 add_test(NAME TwoJointDetour2D COMMAND test_two_joint_detour)
+
+add_executable(test_five_joint_recovery tests/test_five_joint_recovery.cpp)
+target_link_libraries(test_five_joint_recovery PRIVATE robotics_core)
+add_test(NAME FiveJointRecovery2D COMMAND test_five_joint_recovery)

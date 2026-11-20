@@ -395,6 +395,8 @@ PlannedJointPath2D planJointPath2D(std::span<const Joint2D> joints,
 void PlannedMotion2D::reset() noexcept {
     path_.clear();
     index_ = 0;
+    segmentElapsed_ = 0.0;
+    segmentDuration_ = 0.0;
     hasTarget_ = false;
     failed_ = false;
 }
@@ -408,6 +410,8 @@ void PlannedMotion2D::setTarget(std::span<const Joint2D> joints,
     failed_ = !plan.found();
     path_ = plan.waypoints;
     index_ = path_.size() > 1 ? 1 : 0;
+    segmentElapsed_ = 0.0;
+    segmentDuration_ = 0.0;
 }
 
 MotionStatus2D PlannedMotion2D::advance(std::span<Joint2D> joints,
@@ -416,6 +420,7 @@ MotionStatus2D PlannedMotion2D::advance(std::span<Joint2D> joints,
     if (!hasTarget_ || joints.size() != limits.size() || !std::isfinite(dt) ||
         dt <= 0.0 || dt > 0.1)
         throw std::invalid_argument("Follower requires target, joint limits and valid timestep");
+
     MotionStatus2D status;
     status.positionError = (target_ - forwardKinematics(joints).back()).length();
     status.blocked = failed_;
@@ -423,69 +428,77 @@ MotionStatus2D PlannedMotion2D::advance(std::span<Joint2D> joints,
         for (auto& joint : joints) joint.angularVelocity = 0.0;
         return status;
     }
-    if (path_.empty()) return status;
-    // Do not stop mid-motion just because the tip briefly passes through the
-    // tolerance circle; the joint-space trajectory must settle as well.
-    bool settled = true;
-    for (std::size_t i = 0; i < joints.size(); ++i) {
-        if (std::abs(joints[i].angle - path_.back()[i]) > 0.002 ||
-            std::abs(joints[i].angularVelocity) > 0.01) settled = false;
-    }
-    status.reached = status.positionError <= settings.positionTolerance && settled;
-    if (status.reached) return status;
 
-    const auto& goal = path_[index_];
-    bool close = true;
-    for (std::size_t i = 0; i < joints.size(); ++i) {
-        if (std::abs(joints[i].angle - goal[i]) > 0.012 ||
-            std::abs(joints[i].angularVelocity) > 0.035) {
-            close = false;
-            break;
+    if (path_.empty()) return status;
+    if (index_ >= path_.size() || path_.size() == 1) {
+        status.reached = status.positionError <= settings.positionTolerance;
+        return status;
+    }
+
+    // The planner approves straight segments in JOINT SPACE. Driving each
+    // joint independently toward the next waypoint cuts the corner of that
+    // approved segment and can collide near folded configurations/targets.
+    // Instead, use a single time parameter for all joints and stop at each
+    // waypoint. A quintic smoothstep has zero endpoint speed/acceleration.
+    const auto& a = path_[index_ - 1];
+    const auto& b = path_[index_];
+    if (segmentDuration_ == 0.0) {
+        segmentDuration_ = 2.0 * dt;
+        for (std::size_t i = 0; i < joints.size(); ++i) {
+            const double distance = std::abs(b[i] - a[i]);
+            if (distance == 0.0) continue;
+            const double maxSpeed = std::min(settings.maxAngularSpeed,
+                                              limits[i].maxAngularSpeed);
+            const double maxAcceleration = std::min(settings.maxAngularAcceleration,
+                                                     limits[i].maxAngularAcceleration);
+            if (!std::isfinite(maxSpeed) || maxSpeed <= 0.0 ||
+                !std::isfinite(maxAcceleration) || maxAcceleration <= 0.0)
+                throw std::invalid_argument("Invalid joint motion limits");
+            // |s'(u)| <= 1.875 and |s''(u)| <= 5.774 for quintic smoothstep.
+            // Factor 8 accounts for finite-difference acceleration at 60 Hz,
+            // including the final timestep that settles at zero velocity.
+            segmentDuration_ = std::max(segmentDuration_,
+                std::max(1.875 * distance / maxSpeed,
+                         std::sqrt(8.0 * distance / maxAcceleration)));
         }
     }
-    if (close && index_ + 1 < path_.size()) ++index_;
-    const auto& waypoint = path_[index_];
+
+    const double nextElapsed = std::min(segmentDuration_, segmentElapsed_ + dt);
+    const double u = nextElapsed / segmentDuration_;
+    const double progress = u * u * u * (10.0 + u * (-15.0 + 6.0 * u));
+    const bool atWaypoint = nextElapsed >= segmentDuration_;
+
     std::vector<Joint2D> candidate(joints.begin(), joints.end());
+    Angles candidateAngles(joints.size());
     for (std::size_t i = 0; i < joints.size(); ++i) {
-        const double maxSpeed = std::min(settings.maxAngularSpeed, limits[i].maxAngularSpeed);
-        const double maxAcceleration = std::min(settings.maxAngularAcceleration,
-                                                limits[i].maxAngularAcceleration);
-        const double delta = waypoint[i] - joints[i].angle;
-        const double braking = std::sqrt(2.0 * maxAcceleration * std::abs(delta));
-        const double desiredSpeed = std::copysign(std::min({maxSpeed, braking,
-                                                            4.0 * std::abs(delta)}), delta);
-        candidate[i].angularVelocity = joints[i].angularVelocity + std::clamp(
-            desiredSpeed - joints[i].angularVelocity,
-            -maxAcceleration * dt, maxAcceleration * dt);
-        candidate[i].angle += candidate[i].angularVelocity * dt;
-        if (candidate[i].angle < limits[i].minAngle || candidate[i].angle > limits[i].maxAngle) {
-            candidate[i].angle = std::clamp(candidate[i].angle,
-                                            limits[i].minAngle, limits[i].maxAngle);
-            candidate[i].angularVelocity = (candidate[i].angle - joints[i].angle) / dt;
-        }
+        candidate[i].angle = a[i] + (b[i] - a[i]) * progress;
+        candidate[i].angularVelocity = atWaypoint ? 0.0 :
+            (candidate[i].angle - joints[i].angle) / dt;
+        candidateAngles[i] = candidate[i].angle;
     }
-    SearchContext c(joints, limits, settings, target_);
-    if (!c.edge(c.angles(), [&]() {
-            Angles q;
-            for (const auto& joint : candidate) q.push_back(joint.angle);
-            return q;
-        }())) {
-        // Never move through a collision: report a blocked path instead of
-        // silently stalling and repeatedly applying an invalid DLS command.
+
+    SearchContext context(joints, limits, settings, target_);
+    if (!context.edge(context.angles(), candidateAngles)) {
+        // Fail closed if numeric precision or changed constraints invalidate
+        // a path segment. Do not take an unvalidated shortcut.
         failed_ = true;
         status.blocked = true;
         status.constrained = true;
         for (auto& joint : joints) joint.angularVelocity = 0.0;
         return status;
     }
+
     std::copy(candidate.begin(), candidate.end(), joints.begin());
-    status.positionError = (target_ - forwardKinematics(joints).back()).length();
-    settled = true;
-    for (std::size_t i = 0; i < joints.size(); ++i) {
-        if (std::abs(joints[i].angle - path_.back()[i]) > 0.002 ||
-            std::abs(joints[i].angularVelocity) > 0.01) settled = false;
+    segmentElapsed_ = nextElapsed;
+    if (atWaypoint) {
+        segmentElapsed_ = 0.0;
+        segmentDuration_ = 0.0;
+        ++index_;
     }
-    status.reached = status.positionError <= settings.positionTolerance && settled;
+
+    status.positionError = (target_ - forwardKinematics(joints).back()).length();
+    status.reached = index_ >= path_.size() &&
+                     status.positionError <= settings.positionTolerance;
     return status;
 }
 
