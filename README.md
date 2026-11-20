@@ -288,3 +288,45 @@ reach a required target fails the test.
 See [the six-group scenario specification](docs/MOTION_SCENARIOS.md).
 Seven joints are covered by the engine tests even though the current GUI
 editor stops at six.
+
+## Scene obstacles — Phase 2
+
+The simulator now has an **OBSTACLES** sidebar tab. Obstacles are stored
+in world metres as either circles or axis-aligned rectangles, independently
+of raylib, via `include/robotics/geometry/Obstacles2D.hpp`.
+
+Controls:
+
+| Shortcut / control | Action |
+| --- | --- |
+| **OBSTACLES** tab | Open the obstacle editor |
+| **C** | Place a circle (left-click canvas; default radius 0.4 m) |
+| **B** | Place a rectangle (left-click; default width 1.2 m, height 0.7 m) |
+| **V** | Select or drag an existing obstacle with the left mouse button |
+| **T** | Return to target-selection mode |
+| **Delete** | Remove the selected obstacle |
+| **+ / -** in obstacle editor | Adjust the selected radius, width or height |
+
+Up to 16 obstacles can be edited in a scene. A new obstacle, or a moved or
+resized obstacle, cannot intersect the robot's *current* pose. Scene editing
+pauses the simulator and invalidates the old plan: press **Space** to resume.
+A target inside an obstacle is rejected as `NO SAFE PATH FOUND`.
+
+The planner uses the existing bounded IK + RRT-Connect implementation to
+look for a collision-free route around obstacles; it can still fail to
+find a valid path within its budget. Obstacle checks cover **every link**,
+including the tool segment; there is no target-style tool-tip exception
+for solid scene obstacles. Clearance around the link centerline is 0.10 m
+(approximately 0.05 m physical half-width + 0.05 m safety clearance).
+The collision functions support circular and rectangular solids, with
+Euclidean clearances (not only axis-aligned bounding boxes).
+
+Changing the geometry immediately invalidates the old path; the follower
+also rechecks new scene geometry at every movement step. The path sampling
+is fine-grained but is **not yet a mathematically certified continuous
+swept-volume detector**. For guaranteed safety with moving obstacles,
+background replanning and continuous collision detection remain future work.
+
+The new `Obstacles2D` CTest checks geometry, clearances, impossible targets,
+invalid starting configurations, the planner and the actual follower.
+The existing 120-case and 600-case motion matrix tests still run in CI.

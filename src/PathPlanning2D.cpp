@@ -24,11 +24,14 @@ struct SearchContext {
     std::vector<JointLimits2D> limits;
     const MotionSettings2D& settings;
     math::Vec2 target;
+    std::span<const geometry::Obstacle2D> obstacles;
 
     explicit SearchContext(std::span<const Joint2D> state,
                            std::span<const JointLimits2D> bounds,
-                           const MotionSettings2D& s, math::Vec2 goal)
-        : joints(state.begin(), state.end()), limits(bounds.begin(), bounds.end()), settings(s), target(goal) {}
+                           const MotionSettings2D& s, math::Vec2 goal,
+                           std::span<const geometry::Obstacle2D> scene)
+        : joints(state.begin(), state.end()), limits(bounds.begin(), bounds.end()),
+          settings(s), target(goal), obstacles(scene) {}
 
     [[nodiscard]] Angles angles() const {
         Angles q;
@@ -57,7 +60,10 @@ struct SearchContext {
                     return false;
             }
         }
-        return !hasSelfCollision(positions(q), settings.linkClearance);
+        const auto points = positions(q);
+        return !hasSelfCollision(points, settings.linkClearance) &&
+               !geometry::hasObstacleCollision(points, obstacles,
+                                                settings.obstacleClearance);
     }
 
     [[nodiscard]] bool valid(const Angles& q) const {
@@ -139,6 +145,18 @@ struct SearchContext {
                     checks = std::max(1, static_cast<int>(
                         std::ceil(maximumTravel / maxTravelPerCheck)));
                 }
+            }
+            // An obstacle can also be skipped by a wide Cartesian sweep
+            // between adjacent joint samples. Constrain the maximum travel
+            // of any link point when scene obstacles are present.
+            if (!obstacles.empty()) {
+                double downstream = 0.0, maximumTravel = 0.0;
+                for (std::size_t i = q.size(); i-- > 0;) {
+                    downstream += joints[i].length;
+                    maximumTravel += downstream * std::abs(to[i] - from[i]);
+                }
+                checks = std::max(checks, std::max(1,
+                    static_cast<int>(std::ceil(maximumTravel / 0.04))));
             }
             for (int sub = 1; sub <= checks; ++sub) {
                 const double fraction = static_cast<double>(sub) / checks;
@@ -324,6 +342,8 @@ void validate(const SearchContext& c, math::Vec2 target) {
         c.settings.foldClearance >= pi / 2.0 ||
         !std::isfinite(c.settings.targetClearance) ||
         c.settings.targetClearance < 0.0 ||
+        !std::isfinite(c.settings.obstacleClearance) ||
+        c.settings.obstacleClearance < 0.0 ||
         !std::isfinite(c.settings.linkClearance) || c.settings.linkClearance < 0.0)
         throw std::invalid_argument("Planning requires >=2 joints, matching limits and finite target");
     for (std::size_t i = 0; i < c.joints.size(); ++i) {
@@ -341,8 +361,9 @@ void validate(const SearchContext& c, math::Vec2 target) {
 PlannedJointPath2D planJointPath2D(std::span<const Joint2D> joints,
                                    std::span<const JointLimits2D> limits,
                                    math::Vec2 target,
-                                   const MotionSettings2D& settings) {
-    SearchContext c(joints, limits, settings, target);
+                                   const MotionSettings2D& settings,
+                                   std::span<const geometry::Obstacle2D> obstacles) {
+    SearchContext c(joints, limits, settings, target, obstacles);
     validate(c, target);
     const Angles start = c.angles();
     PlannedJointPath2D output;
@@ -355,6 +376,12 @@ PlannedJointPath2D planJointPath2D(std::span<const Joint2D> joints,
     double reach = 0.0;
     for (const auto& joint : joints) reach += joint.length;
     if (target.length() > reach + settings.positionTolerance) return output;
+    // A tool endpoint inside a solid obstacle cannot be a valid goal.
+    for (const auto& obstacle : obstacles) {
+        if (geometry::pointHitsObstacle(target, obstacle,
+                                        settings.obstacleClearance))
+            return output;
+    }
     // The base is fixed at the origin; a target containing the base can
     // never be cleared by the first link, regardless of reconfiguration.
     if (settings.targetClearance > 0.0 &&
@@ -449,8 +476,9 @@ void PlannedMotion2D::reset() noexcept {
 
 void PlannedMotion2D::setTarget(std::span<const Joint2D> joints,
                                 std::span<const JointLimits2D> limits,
-                                math::Vec2 target, const MotionSettings2D& settings) {
-    const auto plan = planJointPath2D(joints, limits, target, settings);
+                                math::Vec2 target, const MotionSettings2D& settings,
+                                std::span<const geometry::Obstacle2D> obstacles) {
+    const auto plan = planJointPath2D(joints, limits, target, settings, obstacles);
     target_ = target;
     hasTarget_ = true;
     failed_ = !plan.found();
@@ -462,7 +490,8 @@ void PlannedMotion2D::setTarget(std::span<const Joint2D> joints,
 
 MotionStatus2D PlannedMotion2D::advance(std::span<Joint2D> joints,
                                         std::span<const JointLimits2D> limits,
-                                        double dt, const MotionSettings2D& settings) {
+                                        double dt, const MotionSettings2D& settings,
+                                        std::span<const geometry::Obstacle2D> obstacles) {
     if (!hasTarget_ || joints.size() != limits.size() || !std::isfinite(dt) ||
         dt <= 0.0 || dt > 0.1)
         throw std::invalid_argument("Follower requires target, joint limits and valid timestep");
@@ -523,7 +552,7 @@ MotionStatus2D PlannedMotion2D::advance(std::span<Joint2D> joints,
         candidateAngles[i] = candidate[i].angle;
     }
 
-    SearchContext context(joints, limits, settings, target_);
+    SearchContext context(joints, limits, settings, target_, obstacles);
     if (!context.edge(context.angles(), candidateAngles)) {
         // Fail closed if numeric precision or changed constraints invalidate
         // a path segment. Do not take an unvalidated shortcut.

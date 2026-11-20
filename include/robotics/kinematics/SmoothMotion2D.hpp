@@ -15,6 +15,7 @@ struct MotionSettings2D {
     double linkClearance{0.10};         // metres between nonadjacent links
     double foldClearance{0.14};        // minimum angle away from a complete fold
     double targetClearance{0.0};       // optional target-object radius, metres
+    double obstacleClearance{0.10};    // robot half-width + obstacle safety margin, m
     double positionTolerance{0.005};  // metres
 };
 

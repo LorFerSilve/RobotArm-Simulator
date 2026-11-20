@@ -3,6 +3,7 @@
 #include "robotics/kinematics/PathPlanning2D.hpp"
 #include "robotics/kinematics/RobotConfiguration2D.hpp"
 #include "robotics/kinematics/Jacobian2D.hpp"
+#include "robotics/geometry/Obstacles2D.hpp"
 
 #include <raylib.h>
 
@@ -13,6 +14,9 @@
 #include <cmath>
 #include <numbers>
 #include <vector>
+#include <span>
+#include <type_traits>
+#include <variant>
 
 namespace {
 
@@ -169,6 +173,163 @@ bool button(int x, int y, int w, int h, const char* label,
     DrawText(label, x + (w - MeasureText(label, font)) / 2,
              y + (h - font) / 2, font, enabled ? light : muted);
     return enabled && hover && pressed;
+}
+
+
+using robotics::geometry::Obstacle2D;
+using robotics::geometry::Circle2D;
+using robotics::geometry::Box2D;
+namespace geom = robotics::geometry;
+
+enum class CanvasTool { Target, PlaceCircle, PlaceBox, MoveObstacle };
+
+const char* toolName(CanvasTool tool) {
+    switch (tool) {
+    case CanvasTool::Target: return "TARGET";
+    case CanvasTool::PlaceCircle: return "PLACE CIRCLE";
+    case CanvasTool::PlaceBox: return "PLACE BOX";
+    case CanvasTool::MoveObstacle: return "MOVE / SELECT";
+    }
+    return "TARGET";
+}
+
+bool shapeSafe(const Obstacle2D& obstacle, const std::vector<Vec2>& positions,
+               double margin) {
+    return geom::validObstacle(obstacle) &&
+        !geom::hasObstacleCollision(positions,
+                                   std::span<const Obstacle2D>(&obstacle, 1),
+                                   margin);
+}
+
+void moveObstacle(Obstacle2D& obstacle, Vec2 position) {
+    std::visit([&](auto& shape) { shape.center = position; }, obstacle);
+}
+
+void drawScene(const Viewport& view, const std::vector<Obstacle2D>& obstacles,
+               int selected) {
+    for (std::size_t i = 0; i < obstacles.size(); ++i) {
+        const bool highlighted = static_cast<int>(i) == selected;
+        const Color fill = highlighted ? Color{248, 181, 88, 100} :
+                                          Color{246, 120, 122, 80};
+        const Color edge = highlighted ? orange : red;
+        std::visit([&](const auto& shape) {
+            using Shape = std::decay_t<decltype(shape)>;
+            if constexpr (std::is_same_v<Shape, Circle2D>) {
+                const auto center = view.toScreen(shape.center);
+                const float r = static_cast<float>(shape.radius) * view.pixelsPerMetre;
+                DrawCircleV(center, r, fill);
+                DrawCircleLines(static_cast<int>(center.x),
+                                static_cast<int>(center.y), r, edge);
+            } else {
+                const auto leftTop = view.toScreen(
+                    {shape.center.x - shape.halfWidth,
+                     shape.center.y + shape.halfHeight});
+                const Rectangle rect{leftTop.x, leftTop.y,
+                    static_cast<float>(2.0 * shape.halfWidth) * view.pixelsPerMetre,
+                    static_cast<float>(2.0 * shape.halfHeight) * view.pixelsPerMetre};
+                DrawRectangleRec(rect, fill);
+                DrawRectangleLinesEx(rect, highlighted ? 3.0F : 2.0F, edge);
+            }
+        }, obstacles[i]);
+    }
+}
+
+bool drawObstaclePanel(int x, int height, CanvasTool& tool,
+                       std::vector<Obstacle2D>& obstacles, int& selected,
+                       std::string& message, const std::vector<Vec2>& positions,
+                       double clearance, Vector2 mouse, bool click) {
+    const int left = x + 20;
+    int y = headerHeight + 83;
+    bool changed = false;
+    DrawText("SCENE OBSTACLES", left, y, 19, light);
+    y += 39;
+    if (button(left, y, 146, 32, "TARGET  [T]", mouse, click))
+        tool = CanvasTool::Target;
+    if (button(left + 159, y, 146, 32, "MOVE  [V]", mouse, click))
+        tool = CanvasTool::MoveObstacle;
+    y += 42;
+    if (button(left, y, 146, 32, "+ CIRCLE  [C]", mouse, click,
+               obstacles.size() < 16))
+        tool = CanvasTool::PlaceCircle;
+    if (button(left + 159, y, 146, 32, "+ BOX  [B]", mouse, click,
+               obstacles.size() < 16))
+        tool = CanvasTool::PlaceBox;
+    y += 45;
+    DrawText(TextFormat("Tool: %s", toolName(tool)), left, y, 15, green);
+    y += 26;
+    DrawText("Left-click in canvas to place/select.", left, y, 13, muted);
+    y += 21;
+    DrawText("Drag selected shape to move it.", left, y, 13, muted);
+    y += 21;
+    DrawText("Changes pause and invalidate the path.", left, y, 13, muted);
+    y += 31;
+    DrawLine(left, y, left + 305, y, gridColor);
+    y += 25;
+
+    DrawText(TextFormat("Obstacles: %d / 16",
+                        static_cast<int>(obstacles.size())), left, y, 17, light);
+    y += 37;
+    if (selected >= 0 && static_cast<std::size_t>(selected) < obstacles.size()) {
+        const auto& obstacle = obstacles[static_cast<std::size_t>(selected)];
+        const bool circle = std::holds_alternative<Circle2D>(obstacle);
+        const Vec2 center = std::visit([](const auto& shape) {
+            return shape.center;
+        }, obstacle);
+        DrawText(TextFormat("Selected #%d : %s", selected + 1,
+                            circle ? "CIRCLE" : "RECTANGLE"), left, y, 16, orange);
+        y += 29;
+        DrawText(TextFormat("Center: (%.2f, %.2f) m", center.x, center.y),
+                 left, y, 15, muted);
+        y += 31;
+
+        const int rows = circle ? 1 : 2;
+        for (int axis = 0; axis < rows; ++axis) {
+            const double size = circle ?
+                std::get<Circle2D>(obstacle).radius :
+                axis == 0 ? std::get<Box2D>(obstacle).halfWidth * 2.0 :
+                            std::get<Box2D>(obstacle).halfHeight * 2.0;
+            DrawText(circle ? "Radius" : axis == 0 ? "Width" : "Height",
+                     left, y + 4, 15, muted);
+            DrawText(TextFormat("%.2f m", size), left + 135, y + 4, 15, light);
+            const bool minus = button(left + 234, y, 30, 28, "-", mouse, click);
+            const bool plus = button(left + 274, y, 30, 28, "+", mouse, click);
+            if (minus || plus) {
+                auto updated = obstacle;
+                const double change = (plus ? 0.1 : -0.1);
+                if (circle) {
+                    auto& shape = std::get<Circle2D>(updated);
+                    shape.radius = std::clamp(shape.radius + change, 0.1, 5.0);
+                } else {
+                    auto& shape = std::get<Box2D>(updated);
+                    if (axis == 0) shape.halfWidth =
+                        std::clamp(shape.halfWidth + change * 0.5, 0.1, 5.0);
+                    else shape.halfHeight =
+                        std::clamp(shape.halfHeight + change * 0.5, 0.1, 5.0);
+                }
+                if (shapeSafe(updated, positions, clearance)) {
+                    obstacles[static_cast<std::size_t>(selected)] = updated;
+                    changed = true;
+                    message = "Obstacle size updated.";
+                } else message = "Blocked: obstacle would hit the arm.";
+            }
+            y += 42;
+        }
+        y += 9;
+        if (button(left, y, 305, 34, "DELETE SELECTED  [DEL]",
+                   mouse, click)) {
+            obstacles.erase(obstacles.begin() + selected);
+            selected = -1;
+            changed = true;
+            message = "Obstacle removed.";
+        }
+    } else {
+        DrawText("No obstacle selected.", left, y, 15, muted);
+    }
+    y = std::max(y + 44, height - 97);
+    if (!message.empty())
+        DrawText(message.c_str(), left, y, 13,
+                 message.find("Blocked") != std::string::npos ? red : green);
+    return changed;
 }
 
 // Editor changes are kept in a draft. Apply creates a validated new robot
@@ -331,8 +492,13 @@ int main() {
     Robot2D robot = makeRobot2D(appliedDefinition, motionSettings);
     auto& joints = robot.joints;
     std::size_t selectedJoint = 0;
-    bool configTab = false;
+    int activeTab = 0; // 0 telemetry, 1 robot configuration, 2 obstacles
     std::string feedback;
+    std::string obstacleFeedback;
+    std::vector<Obstacle2D> obstacles;
+    int selectedObstacle = -1;
+    CanvasTool canvasTool = CanvasTool::Target;
+    bool draggingObstacle = false;
     Vec2 target{1.5, 1.5};
     double simulatedTime = 0.0;
     double accumulator = 0.0;
@@ -342,6 +508,17 @@ int main() {
     PlannedMotion2D plannedMotion;
     bool pendingPlan = true;
     bool draggingTarget = false;
+
+    auto sceneChanged = [&] {
+        // A new or moved obstacle invalidates every previous path.
+        // Safely stop before following an obsolete collision model.
+        paused = true;
+        accumulator = 0.0;
+        plannedMotion.reset();
+        pendingPlan = true;
+        motionState = {};
+        for (auto& joint : joints) joint.angularVelocity = 0.0;
+    };
 
     while (!WindowShouldClose()) {
         if (IsKeyPressed(KEY_SPACE)) {
@@ -357,23 +534,34 @@ int main() {
         const bool selectFour = IsKeyPressed(KEY_FOUR);
         const bool selectFive = IsKeyPressed(KEY_FIVE);
         if (reset || selectTwo || selectThree || selectFour || selectFive) {
-            if (selectTwo || selectThree || selectFour || selectFive) {
-                jointCount = selectFive ? 5 : selectFour ? 4 : selectThree ? 3 : 2;
-                appliedDefinition = makePreset(jointCount);
-                draft = appliedDefinition;
-                selectedJoint = 0;
-                feedback.clear();
+            const bool changePreset = selectTwo || selectThree || selectFour || selectFive;
+            const int nextCount = changePreset ?
+                (selectFive ? 5 : selectFour ? 4 : selectThree ? 3 : 2) : jointCount;
+            auto nextDefinition = changePreset ? makePreset(nextCount) : appliedDefinition;
+            auto nextRobot = makeRobot2D(nextDefinition, motionSettings);
+            if (geom::hasObstacleCollision(forwardKinematics(nextRobot.joints),
+                                            obstacles, motionSettings.obstacleClearance)) {
+                obstacleFeedback = "Blocked: preset intersects obstacle.";
+                sceneChanged();
+            } else {
+                if (changePreset) {
+                    jointCount = nextCount;
+                    appliedDefinition = std::move(nextDefinition);
+                    draft = appliedDefinition;
+                    selectedJoint = 0;
+                    feedback.clear();
+                }
+                robot = std::move(nextRobot);
+                target = jointCount >= 4 ? forwardKinematics(joints).back() :
+                                              Vec2{1.5, 1.5};
+                simulatedTime = 0.0;
+                accumulator = 0.0;
+                paused = false;
+                motionState = {};
+                plannedMotion.reset();
+                pendingPlan = true;
+                draggingTarget = false;
             }
-            robot = makeRobot2D(appliedDefinition, motionSettings);
-            target = jointCount >= 4 ? forwardKinematics(joints).back() :
-                                          Vec2{1.5, 1.5};
-            simulatedTime = 0.0;
-            accumulator = 0.0;
-            paused = false;
-            motionState = {};
-            plannedMotion.reset();
-            pendingPlan = true;
-            draggingTarget = false;
         }
 
         const int width = GetScreenWidth();
@@ -390,14 +578,76 @@ int main() {
             zoom = std::clamp(zoom + GetMouseWheelMove() * 0.12F, 0.55F, 2.5F);
         }
         const auto viewport = makeViewport(canvasWidth, height, reach, zoom);
-        if (mouseInCanvas && IsMouseButtonDown(MOUSE_BUTTON_LEFT)) {
-            target = viewport.toWorld(mouse);
+        if (IsKeyPressed(KEY_T)) canvasTool = CanvasTool::Target;
+        if (IsKeyPressed(KEY_C)) { canvasTool = CanvasTool::PlaceCircle; activeTab = 2; }
+        if (IsKeyPressed(KEY_B)) { canvasTool = CanvasTool::PlaceBox; activeTab = 2; }
+        if (IsKeyPressed(KEY_V)) { canvasTool = CanvasTool::MoveObstacle; activeTab = 2; }
+
+        bool obstacleEdited = false;
+        if (IsKeyPressed(KEY_DELETE) && selectedObstacle >= 0 &&
+            static_cast<std::size_t>(selectedObstacle) < obstacles.size()) {
+            obstacles.erase(obstacles.begin() + selectedObstacle);
+            selectedObstacle = -1;
+            draggingObstacle = false;
+            obstacleEdited = true;
+            obstacleFeedback = "Obstacle removed.";
+        }
+        const Vec2 worldMouse = viewport.toWorld(mouse);
+        if (mouseInCanvas && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
+            if (canvasTool == CanvasTool::PlaceCircle ||
+                canvasTool == CanvasTool::PlaceBox) {
+                if (obstacles.size() >= 16) {
+                    obstacleFeedback = "Blocked: maximum of 16 obstacles.";
+                } else {
+                    const Obstacle2D created = canvasTool == CanvasTool::PlaceCircle ?
+                        Obstacle2D{Circle2D{worldMouse, 0.4}} :
+                        Obstacle2D{Box2D{worldMouse, 0.6, 0.35}};
+                    if (shapeSafe(created, forwardKinematics(joints),
+                                  motionSettings.obstacleClearance)) {
+                        obstacles.push_back(created);
+                        selectedObstacle = static_cast<int>(obstacles.size()) - 1;
+                        obstacleEdited = true;
+                        obstacleFeedback = "Obstacle added.";
+                        canvasTool = CanvasTool::MoveObstacle;
+                    } else obstacleFeedback = "Blocked: obstacle would hit the arm.";
+                }
+            } else if (canvasTool == CanvasTool::MoveObstacle) {
+                selectedObstacle = -1;
+                const double selectMargin = 9.0 / viewport.pixelsPerMetre;
+                for (std::size_t i = obstacles.size(); i-- > 0;) {
+                    if (geom::pointHitsObstacle(worldMouse, obstacles[i], selectMargin)) {
+                        selectedObstacle = static_cast<int>(i);
+                        break;
+                    }
+                }
+                draggingObstacle = selectedObstacle >= 0;
+            }
+        }
+        if (draggingObstacle && mouseInCanvas &&
+            IsMouseButtonDown(MOUSE_BUTTON_LEFT) &&
+            selectedObstacle >= 0 &&
+            static_cast<std::size_t>(selectedObstacle) < obstacles.size()) {
+            auto candidate = obstacles[static_cast<std::size_t>(selectedObstacle)];
+            moveObstacle(candidate, worldMouse);
+            if (shapeSafe(candidate, forwardKinematics(joints),
+                          motionSettings.obstacleClearance)) {
+                obstacles[static_cast<std::size_t>(selectedObstacle)] = candidate;
+                obstacleEdited = true;
+                obstacleFeedback = "Obstacle moved.";
+            } else obstacleFeedback = "Blocked: obstacle would hit the arm.";
+        }
+        if (IsMouseButtonReleased(MOUSE_BUTTON_LEFT)) draggingObstacle = false;
+
+        if (canvasTool == CanvasTool::Target && mouseInCanvas &&
+            IsMouseButtonDown(MOUSE_BUTTON_LEFT)) {
+            target = worldMouse;
             draggingTarget = true;
         }
         if (draggingTarget && IsMouseButtonReleased(MOUSE_BUTTON_LEFT)) {
             draggingTarget = false;
             pendingPlan = true;
         }
+        if (obstacleEdited) sceneChanged();
 
         if (!paused) {
             // Plan a safe joint-space route once the target is committed.
@@ -405,7 +655,7 @@ int main() {
             accumulator += std::min(static_cast<double>(GetFrameTime()), 0.1);
             for (int steps = 0; accumulator >= fixedDt && steps < 6; ++steps) {
                 if (draggingTarget) {
-                    if (joints.size() == 2) {
+                    if (joints.size() == 2 && obstacles.empty()) {
                         motionState = advanceTowardTarget(joints, target, fixedDt,
                                                           motionSettings, robot.limits);
                     } else {
@@ -414,11 +664,11 @@ int main() {
                     }
                 } else {
                     if (pendingPlan) {
-                        plannedMotion.setTarget(joints, robot.limits, target, motionSettings);
+                        plannedMotion.setTarget(joints, robot.limits, target, motionSettings, obstacles);
                         pendingPlan = false;
                     }
                     motionState = plannedMotion.advance(joints, robot.limits,
-                                                         fixedDt, motionSettings);
+                                                         fixedDt, motionSettings, obstacles);
                 }
                 simulatedTime += fixedDt;
                 accumulator -= fixedDt;
@@ -449,10 +699,11 @@ int main() {
         DrawRectangle(0, headerHeight, canvasWidth, height - headerHeight, canvasColor);
         drawGrid(viewport, canvasWidth, height);
         BeginScissorMode(0, headerHeight, canvasWidth, height - headerHeight);
+        drawScene(viewport, obstacles, selectedObstacle);
         drawArm(viewport, positions, target,
                 !unreachable && !(!draggingTarget && plannedMotion.searchFailed()));
         EndScissorMode();
-        DrawText("CLICK/DRAG Target   SPACE Pause   R Reset   2-5 Presets   WHEEL Zoom",
+        DrawText("T Target   C Circle   B Box   V Move   DEL Remove   SPACE Pause   2-5 Presets",
                  20, height - 28, 15, muted);
         DrawRectangle(0, 0, width, headerHeight, background);
         DrawText("ROBOTARM", 23, 16, 25, light);
@@ -462,17 +713,23 @@ int main() {
                       height - headerHeight, sidebarColor);
         const bool click = IsMouseButtonPressed(MOUSE_BUTTON_LEFT);
         const Vector2 cursor = GetMousePosition();
-        if (button(panelX + 20, headerHeight + 14, 145, 35, "TELEMETRY",
-                   cursor, click)) configTab = false;
-        if (button(panelX + 182, headerHeight + 14, 148, 35, "CONFIGURE",
-                   cursor, click)) configTab = true;
-        if (configTab) {
+        if (button(panelX + 14, headerHeight + 14, 100, 35, "TELEMETRY",
+                   cursor, click)) activeTab = 0;
+        if (button(panelX + 125, headerHeight + 14, 100, 35, "CONFIGURE",
+                   cursor, click)) activeTab = 1;
+        if (button(panelX + 236, headerHeight + 14, 100, 35, "OBSTACLES",
+                   cursor, click)) activeTab = 2;
+        if (activeTab == 1) {
             bool apply = false;
             drawConfigurator(panelX, height, draft, selectedJoint,
                              apply, feedback, cursor, click);
             if (apply) {
                 try {
                     auto next = makeRobot2D(draft, motionSettings);
+                    if (geom::hasObstacleCollision(forwardKinematics(next.joints),
+                                                   obstacles,
+                                                   motionSettings.obstacleClearance))
+                        throw std::invalid_argument("Robot intersects an obstacle");
                     robot = std::move(next);
                     appliedDefinition = draft;
                     jointCount = static_cast<int>(draft.size());
@@ -489,6 +746,12 @@ int main() {
                     feedback = std::string("Error: ") + ex.what();
                 }
             }
+        } else if (activeTab == 2) {
+            const bool changed = drawObstaclePanel(
+                panelX, height, canvasTool, obstacles, selectedObstacle,
+                obstacleFeedback, positions, motionSettings.obstacleClearance,
+                cursor, click);
+            if (changed) sceneChanged();
         } else {
             drawSidebar(width, height, joints, target, positions.back(), velocity,
                         error, simulatedTime, paused, reached, stalled,

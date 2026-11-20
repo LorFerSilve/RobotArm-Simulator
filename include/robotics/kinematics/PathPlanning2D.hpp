@@ -1,6 +1,7 @@
 #pragma once
 
 #include "robotics/kinematics/SmoothMotion2D.hpp"
+#include "robotics/geometry/Obstacles2D.hpp"
 
 #include <cstddef>
 #include <span>
@@ -24,7 +25,8 @@ struct PlannedJointPath2D {
     std::span<const Joint2D> joints,
     std::span<const JointLimits2D> limits,
     math::Vec2 target,
-    const MotionSettings2D& settings = {});
+    const MotionSettings2D& settings = {},
+    std::span<const geometry::Obstacle2D> obstacles = {});
 
 // Stateful path follower: execute planned joint-space waypoints with bounded
 // joint velocity and acceleration, checking collisions before each step.
@@ -34,11 +36,13 @@ public:
     void setTarget(std::span<const Joint2D> joints,
                    std::span<const JointLimits2D> limits,
                    math::Vec2 target,
-                   const MotionSettings2D& settings = {});
+                   const MotionSettings2D& settings = {},
+                   std::span<const geometry::Obstacle2D> obstacles = {});
     [[nodiscard]] MotionStatus2D advance(std::span<Joint2D> joints,
                                           std::span<const JointLimits2D> limits,
                                           double dt,
-                                          const MotionSettings2D& settings = {});
+                                          const MotionSettings2D& settings = {},
+                                          std::span<const geometry::Obstacle2D> obstacles = {});
     [[nodiscard]] bool pathAvailable() const noexcept { return !path_.empty(); }
     [[nodiscard]] bool searchFailed() const noexcept { return failed_; }
     [[nodiscard]] bool hasTarget() const noexcept { return hasTarget_; }

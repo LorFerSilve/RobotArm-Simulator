@@ -27,14 +27,18 @@ the simulator grows. See the root README for build and usage instructions.
 
 ### Phase 2 — Scene obstacles and geometry
 
-- [ ] Add circles and axis-aligned rectangles to the GUI, including edit/move/delete.
-- [ ] Define a shared 2D obstacle representation outside rendering code.
-- [ ] Detect link-to-obstacle collisions, respecting arm thickness and clearance.
-- [ ] Validate start/goal configurations against scene obstacles.
+- [x] Add circles and axis-aligned rectangles to the GUI, including edit/move/delete.
+- [x] Define a shared 2D obstacle representation outside rendering code.
+- [x] Detect link-to-obstacle collisions, respecting arm thickness and clearance.
+- [x] Validate start/goal configurations against scene obstacles.
 
 ### Phase 3 — Motion planning and smooth trajectories
 
-- [ ] Integrate obstacle checks into every configuration-space path edge.
+The first scene-aware planning integration is already included in Phase 2.
+A bounded RRT planner can attempt to route around fixed obstacles; global
+completeness and real-time replanning are not yet guaranteed.
+
+- [x] Integrate obstacle checks into every configuration-space path edge and follower step.
 - [ ] Improve the planner's search coverage and report *why* planning failed:
       no IK goal, exhausted sample budget, collision, or limited workspace.
 - [ ] Move planning off the GUI rendering thread and support cancellation when

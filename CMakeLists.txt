@@ -17,6 +17,7 @@ add_library(robotics_core STATIC
     src/SmoothMotion2D.cpp
     src/PathPlanning2D.cpp
     src/RobotConfiguration2D.cpp
+    src/Obstacles2D.cpp
 )
 
 target_include_directories(robotics_core PUBLIC
@@ -108,3 +109,8 @@ target_link_libraries(test_release_motions PRIVATE robotics_core)
 add_test(NAME ReleaseMotionMatrix COMMAND test_release_motions)
 add_test(NAME ReleaseMotionStress COMMAND test_release_motions --stress)
 set_tests_properties(ReleaseMotionStress PROPERTIES LABELS "stress;release" TIMEOUT 600)
+
+# Shared geometry and scene-aware collision/path/follower regressions.
+add_executable(test_obstacles tests/test_obstacles.cpp)
+target_link_libraries(test_obstacles PRIVATE robotics_core)
+add_test(NAME Obstacles2D COMMAND test_obstacles)
