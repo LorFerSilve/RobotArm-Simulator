@@ -365,6 +365,10 @@ self-collisions, target-object clearance, and scene obstacles as the
 original polyline. If rounding a corner would cause contact, the tangent
 is set to zero at that corner and the robot makes a safe stop there.
 Thus smoothing is *opportunistic*, never a bypass for collision rules.
+If a complete smoothed profile cannot be validated due to geometry or
+floating-point differences, the original collision-checked waypoint
+follower remains available as a safe fallback; the goal is **not**
+discarded simply because a cosmetic trajectory improvement failed.
 There is still no certified swept-volume geometry or real-world dynamics.
 
 The GUI prepares this trajectory on the asynchronous worker, so smoothing

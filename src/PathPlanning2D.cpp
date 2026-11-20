@@ -443,9 +443,13 @@ int extend(std::vector<Node>& tree, const Angles& target, const SearchContext& c
         }
         if (safe) break;
         if (!changed) {
-            plan.waypoints.clear();
-            plan.failure = c.cancelled() ? PlanningFailure2D::Cancelled :
-                                           PlanningFailure2D::PathSearchExhausted;
+            // The original RRT polyline has already passed collision checks.
+            // A rounded curve can fail extra tests from numerical differences;
+            // NEVER discard a valid path merely because smoothing is unsafe.
+            // Reuse the earlier safe, stop-at-waypoint quintic follower.
+            plan.splineTangents.clear();
+            plan.pathDistances.clear();
+            plan.trajectoryDuration = 0.0;
             return plan;
         }
     }
