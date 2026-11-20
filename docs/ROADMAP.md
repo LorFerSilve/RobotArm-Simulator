@@ -41,6 +41,8 @@ completeness and real-time replanning are not yet guaranteed.
 - [x] Integrate obstacle checks into every configuration-space path edge and follower step.
 - [x] Report specific planning failures: no IK solution, exhausted sample
       budget, target inside an obstacle, cancellation, or out-of-reach goal.
+- [x] Permit virtual numerical IK iterations through scene obstacles
+      while validating final IK poses and all physical trajectories.
 - [ ] Improve search coverage for difficult constrained workspaces (adaptive
       budget and goal sampling) without weakening collision checks.
 - [x] Run planning on a C++20 worker; cancel superseded jobs when targets,

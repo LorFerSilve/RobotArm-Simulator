@@ -50,7 +50,7 @@ struct SearchContext {
         return forwardKinematics(robot);
     }
 
-    [[nodiscard]] bool validRobot(const Angles& q) const {
+    [[nodiscard]] bool validJointAngles(const Angles& q) const {
         if (cancelled() || q.size() != joints.size()) return false;
         for (std::size_t i = 0; i < q.size(); ++i) {
             if (!std::isfinite(q[i]) || q[i] < limits[i].minAngle ||
@@ -64,6 +64,11 @@ struct SearchContext {
                     return false;
             }
         }
+        return true;
+    }
+
+    [[nodiscard]] bool validRobot(const Angles& q) const {
+        if (!validJointAngles(q)) return false;
         const auto points = positions(q);
         return !hasSelfCollision(points, settings.linkClearance) &&
                !geometry::hasObstacleCollision(points, obstacles,
@@ -73,25 +78,6 @@ struct SearchContext {
     [[nodiscard]] bool valid(const Angles& q) const {
         return validRobot(q) &&
                targetApproachClear(positions(q), target, settings.targetClearance);
-    }
-
-    // Only a geometric IK search: its intermediate iterations are not real
-    // robot movements, so the target-object keep-out zone is not imposed here.
-    [[nodiscard]] bool edgeRobot(const Angles& a, const Angles& b) const {
-        if (!validRobot(a)) return false;
-        double maxDelta = 0.0;
-        for (std::size_t i = 0; i < a.size(); ++i)
-            maxDelta = std::max(maxDelta, std::abs(a[i] - b[i]));
-        const auto steps = std::max(1, static_cast<int>(std::ceil(maxDelta / edgeResolution)));
-        Angles q(a.size());
-        for (int step = 1; step <= steps; ++step) {
-            if (cancelled()) return false;
-            const double alpha = static_cast<double>(step) / steps;
-            for (std::size_t i = 0; i < q.size(); ++i)
-                q[i] = a[i] + alpha * (b[i] - a[i]);
-            if (!validRobot(q)) return false;
-        }
-        return true;
     }
 
     // Distance to the entire arm, including its tool, used only to prove
@@ -227,7 +213,11 @@ double distanceSquared(const Angles& a, const Angles& b) {
             for (std::size_t i = 0; i < q.size(); ++i)
                 next[i] = std::clamp(q[i] + alpha * direction[i],
                                      c.limits[i].minAngle, c.limits[i].maxAngle);
-            if (!c.edgeRobot(q, next)) continue;
+            // IK iterations are virtual numerical guesses, not executed
+            // robot states. Do not reject a feasible goal just because an
+            // intermediate *calculation* overlaps a scene obstacle.
+            // Final IK solutions and the real RRT path are still fully checked.
+            if (!c.validJointAngles(next)) continue;
             const double nextError = (target - c.positions(next).back()).length();
             if (nextError < error - 1e-9) {
                 q = std::move(next);
@@ -647,7 +637,7 @@ PlannedJointPath2D planJointPath2D(std::span<const Joint2D> joints,
                 seed[i] = std::uniform_real_distribution<double>(low, high)(rng);
             }
         }
-        if (!c.validRobot(seed) || !refineIK(c, seed, target)) continue;
+        if (!c.validJointAngles(seed) || !refineIK(c, seed, target)) continue;
         foundGoal = true;
         const auto path = connectPath(c, start, seed, rng);
         if (path.empty()) continue;

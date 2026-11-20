@@ -374,3 +374,17 @@ There is still no certified swept-volume geometry or real-world dynamics.
 The GUI prepares this trajectory on the asynchronous worker, so smoothing
 itself does not interrupt rendering. The `SmoothTrajectory2D` CTest
 verifies coordinated time-stepped arrival and motion limits.
+
+## Phase 3 — Obstacle-aware IK goal search
+
+A previous numerical-search limitation treated virtual IK iterations as if
+they were physical robot movements, rejecting intermediate guesses that
+would intersect scene obstacles. The goal search now restricts these
+*virtual* samples by joint ranges and elbow branches but permits transient
+scene contact during calculation. **Only a collision-free final IK pose**
+is accepted, and the real RRT path and follower remain fully checked
+against all obstacle and target clearances.
+
+This improves goal-discovery coverage without relaxing any physical
+motion constraint. It does not make bounded random sampling complete.
+A three-joint obstacle-aware motion is included in `Obstacles2D` CTest.

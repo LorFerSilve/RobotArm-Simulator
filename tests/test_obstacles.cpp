@@ -181,6 +181,49 @@ int main() {
         }
         require(completed, "End effector did not finish obstacle detour");
 
+        // IK is a virtual numerical search, not a physical trajectory.
+        // The solver may consider colliding intermediate guesses, but the
+        // selected goal and all executed steps must remain obstacle-free.
+        std::vector<Joint2D> redundant{
+            {1.25, 0.3, 0.0}, {0.75, -0.7, 0.0}, {1.1, 0.8, 0.0}
+        };
+        const std::vector<JointLimits2D> redundantLimits{
+            {-2*pi, 2*pi, 2.0, 6.0},
+            {-pi + 0.16, -0.16, 2.0, 6.0},
+            {0.16, pi - 0.16, 2.0, 6.0}
+        };
+        const std::vector<Obstacle2D> sceneWithCircle{
+            Circle2D{{2.0, 0.9}, 0.12}
+        };
+        const Vec2 redundantTarget{1.6, 1.1};
+        require(!hasObstacleCollision(forwardKinematics(redundant),
+                                      sceneWithCircle, 0.10),
+                "Three-joint obstacle case has a safe initial pose");
+        require(!pointHitsObstacle(redundantTarget,
+                                   sceneWithCircle.front(), 0.10),
+                "Three-joint goal must be outside obstacle");
+        const auto redundantPlan = planJointPath2D(
+            redundant, redundantLimits, redundantTarget, {}, sceneWithCircle);
+        require(redundantPlan.found(),
+                "Three-joint planner should find obstacle-free IK goal");
+        PlannedMotion2D redundantFollower;
+        redundantFollower.setTarget(redundant, redundantLimits, redundantTarget,
+                                    {}, sceneWithCircle);
+        require(redundantFollower.pathAvailable(),
+                "Three-joint follower should accept the obstacle-aware path");
+        bool redundantArrived = false;
+        for (int frame = 0; frame < 1800; ++frame) {
+            const auto state = redundantFollower.advance(
+                redundant, redundantLimits, 1.0 / 60.0, {}, sceneWithCircle);
+            require(!state.blocked, "Three-joint follower blocked unexpectedly");
+            require(!hasObstacleCollision(forwardKinematics(redundant),
+                                           sceneWithCircle, 0.10),
+                    "Three-joint motion entered a scene obstacle");
+            if (state.reached) { redundantArrived = true; break; }
+        }
+        require(redundantArrived,
+                "Three-joint obstacle-aware movement failed to finish");
+
         std::cout << "Obstacle geometry, planning and execution passed\n";
     } catch (const std::exception& error) {
         std::cerr << "FAILED: " << error.what() << '\n';
