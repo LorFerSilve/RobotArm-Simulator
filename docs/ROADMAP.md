@@ -62,7 +62,9 @@ completeness and real-time replanning are not yet guaranteed.
 
 - [ ] Graph angle, speed, acceleration, Cartesian error, Jacobian condition
       and planner state over time.
-- [ ] Visualize robot paths, candidate end poses, and collision envelopes.
+- [x] Display a sampled end-effector path silhouette from the actual
+      planned spline or collision-checked joint-space polyline.
+- [ ] Visualize other joint paths, candidate end poses, and collision envelopes.
 - [ ] Allow reproducible recording/replay of configurations and scenarios.
 
 ### Phase 5 — 3D robot kinematics

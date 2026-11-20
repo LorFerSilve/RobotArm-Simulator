@@ -126,3 +126,8 @@ add_test(NAME AsyncPlanner2D COMMAND test_async_planner)
 add_executable(test_smooth_trajectory tests/test_smooth_trajectory.cpp)
 target_link_libraries(test_smooth_trajectory PRIVATE robotics_core)
 add_test(NAME SmoothTrajectory2D COMMAND test_smooth_trajectory)
+
+# Planned joint-space trajectories projected into world-space tip traces.
+add_executable(test_trajectory_preview tests/test_trajectory_preview.cpp)
+target_link_libraries(test_trajectory_preview PRIVATE robotics_core)
+add_test(NAME TrajectoryPreview2D COMMAND test_trajectory_preview)

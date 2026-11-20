@@ -164,6 +164,26 @@ void drawArm(const Viewport& view, const std::vector<Vec2>& positions,
     }
 }
 
+// A subdued end-effector trajectory silhouette. Points come from FK samples
+// of the planner's verified spline (or its fallback joint-space polyline),
+// not from a naive straight line between the tool and its Cartesian goal.
+void drawEndEffectorTrace(const Viewport& view, std::span<const Vec2> trace) {
+    if (trace.size() < 2) return;
+    constexpr Color pathColor{104, 198, 255, 156};
+    constexpr Color markerColor{104, 198, 255, 205};
+    for (std::size_t i = 1; i < trace.size(); ++i) {
+        DrawLineEx(view.toScreen(trace[i - 1]), view.toScreen(trace[i]),
+                   2.0F, pathColor);
+    }
+    // Small markers establish direction without obscuring joints/obstacles.
+    for (int marker = 1; marker <= 3; ++marker) {
+        const std::size_t index = (trace.size() - 1) *
+                                  static_cast<std::size_t>(marker) / 4;
+        DrawCircleV(view.toScreen(trace[index]), 3.2F, markerColor);
+    }
+    DrawText("PLANNED TIP PATH", 20, headerHeight + 15, 13, markerColor);
+}
+
 bool button(int x, int y, int w, int h, const char* label,
             Vector2 mouse, bool pressed, bool enabled = true) {
     const Rectangle rect{static_cast<float>(x), static_cast<float>(y),
@@ -728,6 +748,9 @@ int main() {
         drawGrid(viewport, canvasWidth, height);
         BeginScissorMode(0, headerHeight, canvasWidth, height - headerHeight);
         drawScene(viewport, obstacles, selectedObstacle);
+        if (!draggingTarget && !reached && !planning &&
+            plannedMotion.pathAvailable())
+            drawEndEffectorTrace(viewport, plannedMotion.endEffectorTrace());
         drawArm(viewport, positions, target,
                 !unreachable && !(plannedMotion.searchFailed() || !planningError.empty()));
         EndScissorMode();
@@ -766,7 +789,9 @@ int main() {
                     accumulator = 0.0;
                     paused = true;
                     motionState = {};
+                    asyncPlanner.cancel();
                     plannedMotion.reset();
+                    planningError.clear();
                     pendingPlan = true;
                     draggingTarget = false;
                     feedback = "Applied. SPACE to move.";

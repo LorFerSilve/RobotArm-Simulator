@@ -490,6 +490,60 @@ int extend(std::vector<Node>& tree, const Angles& target, const SearchContext& c
     return plan;
 }
 
+// Render-only preview, sampled from the same joint-space geometry that the
+// follower will execute. No Cartesian shortcuts: even a full shoulder turn
+// must be projected through FK instead of drawing start-to-target directly.
+[[nodiscard]] PlannedJointPath2D withEndEffectorTrace(
+    const SearchContext& c, PlannedJointPath2D plan) {
+    if (!plan.found()) return plan;
+
+    if (plan.waypoints.size() == 1) {
+        plan.endEffectorTrace.push_back(c.positions(plan.waypoints.front()).back());
+        return plan;
+    }
+
+    const bool spline = plan.trajectoryDuration > 0.0 &&
+        plan.splineTangents.size() == plan.waypoints.size() &&
+        plan.pathDistances.size() == plan.waypoints.size();
+
+    auto robot = c.joints;
+    for (std::size_t segment = 0; segment + 1 < plan.waypoints.size(); ++segment) {
+        const auto& from = plan.waypoints[segment];
+        const auto& to = plan.waypoints[segment + 1];
+
+        // Upper bound for travel of the tip under simultaneous joint motion,
+        // making the rendered trace adapt to long arms and full rotations.
+        double downstreamLength = 0.0;
+        double tipTravelBound = 0.0;
+        for (std::size_t j = from.size(); j-- > 0;) {
+            downstreamLength += robot[j].length;
+            tipTravelBound += downstreamLength * std::abs(to[j] - from[j]);
+        }
+        const int samples = std::clamp(
+            static_cast<int>(std::ceil(tipTravelBound / 0.075)), 16, 512);
+        for (int step = segment == 0 ? 0 : 1; step <= samples; ++step) {
+            if (c.cancelled()) {
+                plan.waypoints.clear();
+                plan.endEffectorTrace.clear();
+                plan.failure = PlanningFailure2D::Cancelled;
+                return plan;
+            }
+            const double t = static_cast<double>(step) / samples;
+            Angles angles = spline ?
+                splinePose(plan.waypoints, plan.splineTangents,
+                           plan.pathDistances, segment, t) : Angles(from.size());
+            if (!spline) {
+                for (std::size_t j = 0; j < angles.size(); ++j)
+                    angles[j] = from[j] + t * (to[j] - from[j]);
+            }
+            for (std::size_t j = 0; j < robot.size(); ++j)
+                robot[j].angle = angles[j];
+            plan.endEffectorTrace.push_back(forwardKinematics(robot).back());
+        }
+    }
+    return plan;
+}
+
 void validate(const SearchContext& c, math::Vec2 target) {
     if (c.joints.size() < 2 || c.joints.size() != c.limits.size() ||
         !std::isfinite(target.x) || !std::isfinite(target.y) ||
@@ -534,7 +588,7 @@ PlannedJointPath2D planJointPath2D(std::span<const Joint2D> joints,
     output.terminalError = (target - c.positions(start).back()).length();
     if (output.terminalError <= settings.positionTolerance && c.valid(start)) {
         output.waypoints = {start};
-        return output;
+        return withEndEffectorTrace(c, std::move(output));
     }
     double reach = 0.0;
     for (const auto& joint : joints) reach += joint.length;
@@ -602,7 +656,7 @@ PlannedJointPath2D planJointPath2D(std::span<const Joint2D> joints,
             if (!c.edge(start, goal)) continue;
             output.waypoints = {start, goal};
             output.terminalError = (target - c.positions(goal).back()).length();
-            return prepareTrajectory(c, std::move(output));
+            return withEndEffectorTrace(c, prepareTrajectory(c, std::move(output)));
         }
         // When no direct transition is safe, search joint space for a detour.
         for (const auto& goal : goals) {
@@ -610,7 +664,7 @@ PlannedJointPath2D planJointPath2D(std::span<const Joint2D> joints,
             if (path.empty()) continue;
             output.waypoints = shorten(c, path);
             output.terminalError = (target - c.positions(goal).back()).length();
-            return prepareTrajectory(c, std::move(output));
+            return withEndEffectorTrace(c, prepareTrajectory(c, std::move(output)));
         }
         output.failure = c.cancelled() ? PlanningFailure2D::Cancelled :
                          goals.empty() ? PlanningFailure2D::NoIKSolution :
@@ -643,7 +697,7 @@ PlannedJointPath2D planJointPath2D(std::span<const Joint2D> joints,
         if (path.empty()) continue;
         output.waypoints = shorten(c, path);
         output.terminalError = (target - c.positions(seed).back()).length();
-        return prepareTrajectory(c, std::move(output));
+        return withEndEffectorTrace(c, prepareTrajectory(c, std::move(output)));
     }
     output.failure = c.cancelled() ? PlanningFailure2D::Cancelled :
                      foundGoal ? PlanningFailure2D::PathSearchExhausted :
@@ -665,6 +719,7 @@ const char* planningFailureMessage(PlanningFailure2D reason) noexcept {
 
 void PlannedMotion2D::reset() noexcept {
     path_.clear();
+    endEffectorTrace_.clear();
     index_ = 0;
     segmentElapsed_ = 0.0;
     segmentDuration_ = 0.0;
@@ -683,6 +738,7 @@ void PlannedMotion2D::usePlan(PlannedJointPath2D plan, math::Vec2 target) {
     failed_ = !plan.found();
     failure_ = plan.failure;
     path_ = std::move(plan.waypoints);
+    endEffectorTrace_ = std::move(plan.endEffectorTrace);
     splineTangents_ = std::move(plan.splineTangents);
     pathDistances_ = std::move(plan.pathDistances);
     trajectoryDuration_ = plan.trajectoryDuration;

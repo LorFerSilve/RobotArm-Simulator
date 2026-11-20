@@ -388,3 +388,26 @@ against all obstacle and target clearances.
 This improves goal-discovery coverage without relaxing any physical
 motion constraint. It does not make bounded random sampling complete.
 A three-joint obstacle-aware motion is included in `Obstacles2D` CTest.
+
+## Live end-effector path silhouette
+
+After a successful path search, the canvas draws a subtle **light-blue
+preview line** showing where the **end effector** will travel on its way
+to the clicked target. The line follows the actual planned trajectory:
+the pre-validated quintic spline when available, or the verified
+joint-space polyline when spline smoothing was not safe. Each intermediate
+joint pose is projected into 2D with forward kinematics, so the preview
+also depicts long-way shoulder rotations and detours around obstacles.
+
+The trace is sampled during background planning and transferred along with
+the plan. Rendering only draws these cached world-space points, without
+rerunning IK or planning on the GUI thread. A preview is visible while
+a valid motion is underway, including when it is paused. It disappears
+once the target is reached, when the user begins choosing another target,
+or whenever the scene/robot changes or planning fails.
+
+The `TrajectoryPreview2D` CTest verifies that the trace starts at
+the current tool position, ends at the planned target, depicts a nontrivial
+two-joint detour, follows the executed end-effector motion, and clears on
+reset or an unsuccessful plan. Existing release-matrix, obstacle and
+asynchronous-planning tests remain enabled.

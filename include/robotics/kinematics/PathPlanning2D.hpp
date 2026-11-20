@@ -31,6 +31,9 @@ struct PlannedJointPath2D {
     std::vector<std::vector<double>> splineTangents;
     std::vector<double> pathDistances;
     double trajectoryDuration{};
+    // End-effector positions sampled from the *actual* selected joint-space
+    // trajectory (spline or verified polyline). Computed on the planner worker.
+    std::vector<math::Vec2> endEffectorTrace;
     PlanningFailure2D failure{PlanningFailure2D::None};
 
     [[nodiscard]] bool found() const noexcept { return !waypoints.empty(); }
@@ -65,6 +68,10 @@ public:
                                           const MotionSettings2D& settings = {},
                                           std::span<const geometry::Obstacle2D> obstacles = {});
     [[nodiscard]] bool pathAvailable() const noexcept { return !path_.empty(); }
+    // Read-only drawing data; reset/new plan clears or replaces it.
+    [[nodiscard]] std::span<const math::Vec2> endEffectorTrace() const noexcept {
+        return endEffectorTrace_;
+    }
     [[nodiscard]] bool searchFailed() const noexcept { return failed_; }
     [[nodiscard]] PlanningFailure2D failureReason() const noexcept { return failure_; }
     [[nodiscard]] bool hasTarget() const noexcept { return hasTarget_; }
@@ -72,6 +79,7 @@ public:
 
 private:
     std::vector<std::vector<double>> path_;
+    std::vector<math::Vec2> endEffectorTrace_;
     std::size_t index_{};
     double segmentElapsed_{};
     double segmentDuration_{};
