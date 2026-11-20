@@ -9,7 +9,7 @@ A modular C++20 robotic arm simulator featuring custom kinematics, Jacobian-base
 - Analytic 2 x N Jacobian, Cartesian end-effector velocity, and 2-joint determinant.
 - Custom damped least-squares inverse kinematics, velocity limiting, and target tolerance.
 - Collision-aware GUI motion: analytic two-link IK with a stable elbow branch, angular speed/acceleration caps, joint clearance, and nonadjacent link collision checks for three or more links.
-- CLI frame telemetry and eight automatic tests using CTest.
+- CLI frame telemetry and nine automatic tests using CTest.
 - Interactive 2D GUI, using raylib **only** for display and input: target selection by mouse, real-time telemetry, pause/reset, grid and zoom.
 - **Configurable robot arm (Phase 1):** edit 2–6 joints, each link's length and initial relative angle, per-joint rotation range, maximum speed, and maximum acceleration in the GUI.
 
@@ -44,13 +44,13 @@ ctest --test-dir build -C Debug --output-on-failure
 .\build\Debug\robot_gui.exe
 ```
 
-The GUI uses 60 Hz fixed-step simulation and a 60 FPS rendering target. Rendering and simulation advance separately. Two joints use closed-form IK and an acceleration-limited joint-space servo to maintain the original elbow configuration. Three joints use the existing damped-least-squares IK with safety-constrained steps.
+The GUI uses 60 Hz fixed-step simulation and a 60 FPS rendering target. Rendering and simulation advance separately. Two joints use closed-form IK and an acceleration-limited joint-space servo to maintain the original elbow configuration. Three to six joints now use a bounded, goal-aware configuration-space path planner instead of repeatedly applying a local DLS velocity command. The path planner uses multi-start constrained IK to find a safe goal configuration, then direct joint interpolation or a bidirectional RRT-Connect search, followed by an acceleration-limited joint-space follower.
 
 ### GUI controls
 
 | Input | Function |
 | --- | --- |
-| Left click/drag within the canvas | Set the end-effector target (metres) |
+| Left click/drag within the canvas | Set the end-effector target (metres); 3+ joint motion is planned on mouse release |
 | `Space` | Pause/resume |
 | `R` | Reset to initial pose and target |
 | `2` | Two-joint robot preset |
@@ -63,7 +63,7 @@ The GUI uses 60 Hz fixed-step simulation and a 60 FPS rendering target. Renderin
 
 The right panel shows target and tip coordinates, Cartesian speed, goal error, simulation time, per-joint angles and angular velocities.
 
-**Limitations:** The two-link robot stays on its original elbow branch and avoids collinear, overlapping configurations. Targets outside the resulting annular workspace are marked **UNREACHABLE** and approached only to the nearest permitted radius; the robot then settles instead of oscillating. For 3+ links, collision checks prohibit nonadjacent segments from intersecting, but a movement may stop at a constrained local configuration: full global collision-free path planning, environment obstacles, joint torques, and physical dynamics remain out of scope. Hard safety constraints can cause abrupt stopping in 3-joint mode.
+**Limitations:** The two-link robot stays on its original elbow branch and avoids collinear, overlapping configurations. Targets outside the resulting annular workspace are marked **UNREACHABLE** and approached only to the nearest permitted radius; the robot then settles instead of oscillating. For 3+ links, the new path planner searches for an alternative collision-free joint configuration and a sequence of safe joint-space waypoints. This is a **bounded, sampling-based search**, not a complete solver: if it cannot find a route within its budget, the GUI displays **NO SAFE PATH FOUND** and does not move through the blocked configuration. The existing controller is still available in the core library; physical obstacle modeling, joint torques and dynamics are not implemented.
 
 ## Math and IK conventions
 
@@ -113,3 +113,31 @@ avoiding fully folded and straight configurations. Consequently, some
 angle ranges are intentionally rejected. Valid configurations are not
 guaranteed to reach every requested target, and collision avoidance for
 three or more joints remains a local controller, not a global path planner.
+
+## Recovery planning for redundant arms (3+ joints)
+
+The GUI now separates **finding a goal configuration**, **checking safe paths**,
+and **following a path**. The reusable C++20 module
+`PathPlanning2D.hpp/.cpp` searches for an alternate inverse-kinematics solution
+using deterministic multi-start damped-Jacobian refinement. It tries direct
+configuration-space interpolation first and falls back to a bounded
+bidirectional RRT-Connect search if that path crosses a self-collision or
+violates the configured joint limits. Edges are collision-checked at a maximum
+angular interpolation step of 0.04 radians; path segments are then shortened
+when a direct shortcut remains safe.
+
+The GUI follows the resulting joint waypoints with per-joint acceleration and
+speed limits. To avoid running an expensive search every rendering frame, a
+new target is committed when the user **releases the mouse button**. The
+2-joint arm keeps the previously tested smooth analytic controller.
+
+A planner timeout or infeasible IK configuration is reported explicitly as
+`NO SAFE PATH FOUND`, never mislabeled as a successfully reached goal.
+This does **not** establish that the goal is mathematically unreachable.
+
+**Outstanding motion-planning work:** interactive planning can still cause a
+short UI pause because it currently runs on the rendering thread; future work
+should move bounded planning to a worker thread and support interruption when
+new targets are chosen. More advanced path smoothing/continuous collision
+checking, joint-branch switching, and planning around user-added obstacles
+are still open. See `docs/ROADMAP.md`.

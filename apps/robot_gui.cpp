@@ -1,5 +1,6 @@
 #include "robotics/kinematics/ForwardKinematics.hpp"
 #include "robotics/kinematics/SmoothMotion2D.hpp"
+#include "robotics/kinematics/PathPlanning2D.hpp"
 #include "robotics/kinematics/RobotConfiguration2D.hpp"
 #include "robotics/kinematics/Jacobian2D.hpp"
 
@@ -234,7 +235,8 @@ void drawConfigurator(int x, int height, std::vector<JointDefinition2D>& draft,
 void drawSidebar(int screenWidth, int height, const std::vector<Joint2D>& joints,
                  Vec2 target, Vec2 endEffector, Vec2 tipVelocity,
                  double error, double elapsed, bool paused,
-                 bool reached, bool stalled, bool constrained, bool unreachable) {
+                 bool reached, bool stalled, bool constrained, bool unreachable,
+                 bool noPath) {
     const int x = screenWidth - sidebarWidth;
     DrawRectangle(x, headerHeight + 64, sidebarWidth, height - headerHeight - 64, sidebarColor);
     DrawLine(x, headerHeight, x, height, gridColor);
@@ -244,10 +246,10 @@ void drawSidebar(int screenWidth, int height, const std::vector<Joint2D>& joints
     y += 36;
 
     const char* status = paused ? "PAUSED" : reached ? "TARGET REACHED" :
-        unreachable ? "UNREACHABLE" :
+        noPath ? "NO SAFE PATH FOUND" : unreachable ? "UNREACHABLE" :
         stalled ? "BLOCKED" : constrained ? "AVOIDING CONTACT" : "MOVING";
     const Color statusColor = paused ? orange : reached ? green :
-        (stalled || unreachable) ? red : constrained ? orange : blue;
+        (stalled || unreachable || noPath) ? red : constrained ? orange : blue;
     DrawText(status, left, y, 16, statusColor);
     y += 33;
     DrawText(TextFormat("Time: %.2f s", elapsed), left, y, 16, muted);
@@ -290,6 +292,7 @@ void drawSidebar(int screenWidth, int height, const std::vector<Joint2D>& joints
 int main() {
     using robotics::kinematics::advanceTowardTarget;
     using robotics::kinematics::MotionStatus2D;
+    using robotics::kinematics::PlannedMotion2D;
     using robotics::kinematics::MotionSettings2D;
     using robotics::kinematics::forwardKinematics;
     using robotics::kinematics::endEffectorJacobian;
@@ -315,6 +318,9 @@ int main() {
     bool paused = false;
     float zoom = 1.0F;
     MotionStatus2D motionState{};
+    PlannedMotion2D plannedMotion;
+    bool pendingPlan = true;
+    bool draggingTarget = false;
 
     while (!WindowShouldClose()) {
         if (IsKeyPressed(KEY_SPACE)) {
@@ -341,6 +347,9 @@ int main() {
             accumulator = 0.0;
             paused = false;
             motionState = {};
+            plannedMotion.reset();
+            pendingPlan = true;
+            draggingTarget = false;
         }
 
         const int width = GetScreenWidth();
@@ -359,14 +368,32 @@ int main() {
         const auto viewport = makeViewport(canvasWidth, height, reach, zoom);
         if (mouseInCanvas && IsMouseButtonDown(MOUSE_BUTTON_LEFT)) {
             target = viewport.toWorld(mouse);
+            draggingTarget = true;
+        }
+        if (draggingTarget && IsMouseButtonReleased(MOUSE_BUTTON_LEFT)) {
+            draggingTarget = false;
+            pendingPlan = true;
         }
 
         if (!paused) {
-            // Fixed-step control, independent of rendering refresh rate.
+            // Fixed-step control; for redundant robots plan only once the
+            // mouse is released so dragging doesn't trigger costly searches.
             accumulator += std::min(static_cast<double>(GetFrameTime()), 0.1);
             for (int steps = 0; accumulator >= fixedDt && steps < 6; ++steps) {
-                motionState = advanceTowardTarget(joints, target, fixedDt,
-                                                  motionSettings, robot.limits);
+                if (joints.size() == 2) {
+                    motionState = advanceTowardTarget(joints, target, fixedDt,
+                                                      motionSettings, robot.limits);
+                } else if (draggingTarget) {
+                    // Wait for a committed target; no outdated plan is executed.
+                    for (auto& joint : joints) joint.angularVelocity = 0.0;
+                } else {
+                    if (pendingPlan) {
+                        plannedMotion.setTarget(joints, robot.limits, target, motionSettings);
+                        pendingPlan = false;
+                    }
+                    motionState = plannedMotion.advance(joints, robot.limits,
+                                                         fixedDt, motionSettings);
+                }
                 simulatedTime += fixedDt;
                 accumulator -= fixedDt;
             }
@@ -376,7 +403,8 @@ int main() {
         const auto jacobian = endEffectorJacobian(positions);
         const auto velocity = endEffectorVelocity(jacobian, joints);
         const double error = (target - positions.back()).length();
-        const bool reached = error <= 0.005;
+        const bool reached = joints.size() == 2 ? error <= 0.005 :
+            (!draggingTarget && motionState.reached && error <= motionSettings.positionTolerance);
         const bool stalled = !reached && motionState.blocked;
         const double radius = target.length();
         bool unreachable = radius > reach;
@@ -395,9 +423,10 @@ int main() {
         DrawRectangle(0, headerHeight, canvasWidth, height - headerHeight, canvasColor);
         drawGrid(viewport, canvasWidth, height);
         BeginScissorMode(0, headerHeight, canvasWidth, height - headerHeight);
-        drawArm(viewport, positions, target, !unreachable);
+        drawArm(viewport, positions, target,
+                !unreachable && !(joints.size() > 2 && !draggingTarget && plannedMotion.searchFailed()));
         EndScissorMode();
-        DrawText("CLICK/DRAG Target   SPACE Pause   R Reset   2/3 Joints   WHEEL Zoom",
+        DrawText("CLICK/DRAG Target (release to plan 3+)   SPACE Pause   R Reset   WHEEL Zoom",
                  20, height - 28, 15, muted);
         DrawRectangle(0, 0, width, headerHeight, background);
         DrawText("ROBOTARM", 23, 16, 25, light);
@@ -426,6 +455,9 @@ int main() {
                     accumulator = 0.0;
                     paused = true;
                     motionState = {};
+                    plannedMotion.reset();
+                    pendingPlan = true;
+                    draggingTarget = false;
                     feedback = "Applied. SPACE to move.";
                 } catch (const std::invalid_argument& ex) {
                     feedback = std::string("Error: ") + ex.what();
@@ -434,7 +466,8 @@ int main() {
         } else {
             drawSidebar(width, height, joints, target, positions.back(), velocity,
                         error, simulatedTime, paused, reached, stalled,
-                        motionState.constrained, unreachable);
+                        motionState.constrained, unreachable,
+                        joints.size() > 2 && !draggingTarget && plannedMotion.searchFailed());
         }
         EndDrawing();
     }

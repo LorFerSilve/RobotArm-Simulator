@@ -15,6 +15,7 @@ add_library(robotics_core STATIC
     src/Jacobian2D.cpp
     src/InverseKinematics2D.cpp
     src/SmoothMotion2D.cpp
+    src/PathPlanning2D.cpp
     src/RobotConfiguration2D.cpp
 )
 
@@ -74,3 +75,7 @@ add_test(NAME RobotConfiguration2D COMMAND test_robot_configuration)
 add_executable(test_joint_limits tests/test_joint_limits.cpp)
 target_link_libraries(test_joint_limits PRIVATE robotics_core)
 add_test(NAME JointLimits2D COMMAND test_joint_limits)
+
+add_executable(test_path_planning tests/test_path_planning.cpp)
+target_link_libraries(test_path_planning PRIVATE robotics_core)
+add_test(NAME PathPlanning2D COMMAND test_path_planning)
