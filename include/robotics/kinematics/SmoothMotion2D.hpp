@@ -17,6 +17,7 @@ struct MotionSettings2D {
     double targetClearance{0.0};       // optional target-object radius, metres
     double obstacleClearance{0.10};    // robot half-width + obstacle safety margin, m
     double positionTolerance{0.005};  // metres
+    double maxAngularJerk{120.0};       // rad/s^3, global spline limit
 };
 
 // Per-joint constraints. The first joint may rotate through zero; for each

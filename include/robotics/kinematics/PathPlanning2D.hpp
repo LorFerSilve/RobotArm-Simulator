@@ -26,6 +26,11 @@ struct PlannedJointPath2D {
     // Empty if a collision-free solution was not found within the search budget.
     std::vector<std::vector<double>> waypoints;
     double terminalError{};
+    // Pre-validated C2 spline geometry, generated in the planning worker.
+    // Empty for already-reached targets, otherwise size matches waypoints.
+    std::vector<std::vector<double>> splineTangents;
+    std::vector<double> pathDistances;
+    double trajectoryDuration{};
     PlanningFailure2D failure{PlanningFailure2D::None};
 
     [[nodiscard]] bool found() const noexcept { return !waypoints.empty(); }
@@ -70,6 +75,10 @@ private:
     std::size_t index_{};
     double segmentElapsed_{};
     double segmentDuration_{};
+    std::vector<std::vector<double>> splineTangents_;
+    std::vector<double> pathDistances_;
+    double trajectoryDuration_{};
+    double trajectoryElapsed_{};
     math::Vec2 target_{};
     bool hasTarget_{};
     bool failed_{};

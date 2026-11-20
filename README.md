@@ -349,3 +349,24 @@ Existing synchronous planner functions remain available for CLI, tests,
 and other code. Async and diagnostics regressions are included in CTest.
 A finite RRT sampling budget still makes the planner *incomplete*; a
 search-budget failure is not a proof of impossibility.
+
+## Phase 3 — Coordinated C2 trajectory smoothing
+
+The planner now generates a collision-checked quintic Hermite trajectory
+from its joint-space waypoints, before returning a path. At compatible
+corners it uses shared joint-space tangents and zero second derivatives,
+so angles, angular velocity and angular acceleration are continuous
+(`C2`) **through the corner**. All joints follow the same global clock.
+The global duration is sized from per-joint speed, acceleration, and a
+global jerk bound (default 120 rad/s³) with conservative numerical margins.
+
+The smoothed path is checked against the **same** joint constraints,
+self-collisions, target-object clearance, and scene obstacles as the
+original polyline. If rounding a corner would cause contact, the tangent
+is set to zero at that corner and the robot makes a safe stop there.
+Thus smoothing is *opportunistic*, never a bypass for collision rules.
+There is still no certified swept-volume geometry or real-world dynamics.
+
+The GUI prepares this trajectory on the asynchronous worker, so smoothing
+itself does not interrupt rendering. The `SmoothTrajectory2D` CTest
+verifies coordinated time-stepped arrival and motion limits.

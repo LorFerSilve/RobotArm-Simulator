@@ -122,3 +122,7 @@ add_test(NAME Obstacles2D COMMAND test_obstacles)
 add_executable(test_async_planner tests/test_async_planner.cpp)
 target_link_libraries(test_async_planner PRIVATE robotics_core)
 add_test(NAME AsyncPlanner2D COMMAND test_async_planner)
+
+add_executable(test_smooth_trajectory tests/test_smooth_trajectory.cpp)
+target_link_libraries(test_smooth_trajectory PRIVATE robotics_core)
+add_test(NAME SmoothTrajectory2D COMMAND test_smooth_trajectory)

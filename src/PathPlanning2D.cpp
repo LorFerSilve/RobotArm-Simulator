@@ -342,6 +342,160 @@ int extend(std::vector<Node>& tree, const Angles& target, const SearchContext& c
     return simplified;
 }
 
+// Quintic Hermite curve in joint space with position, shared tangent and
+// zero second derivative at each waypoint. Shared tangents yield C2 motion
+// through safe corners; unsafe corners get zero tangent and a safe stop.
+[[nodiscard]] Angles splinePose(const std::vector<Angles>& waypoints,
+                                const std::vector<Angles>& tangents,
+                                const std::vector<double>& distances,
+                                std::size_t segment, double u) {
+    const auto& a = waypoints[segment];
+    const auto& b = waypoints[segment + 1];
+    const double h = distances[segment + 1] - distances[segment];
+    Angles result(a.size());
+    for (std::size_t j = 0; j < a.size(); ++j) {
+        const double p = h * tangents[segment][j];
+        const double q = h * tangents[segment + 1][j];
+        const double d = b[j] - a[j];
+        const double A = 10.0 * d - 6.0 * p - 4.0 * q;
+        const double B = -15.0 * d + 8.0 * p + 7.0 * q;
+        const double C = 6.0 * d - 3.0 * p - 3.0 * q;
+        const double u2 = u * u;
+        result[j] = a[j] + p * u +
+                    u2 * u * (A + u * (B + u * C));
+    }
+    return result;
+}
+
+[[nodiscard]] PlannedJointPath2D prepareTrajectory(
+    const SearchContext& c, PlannedJointPath2D plan) {
+    if (plan.waypoints.size() < 2) return plan;
+
+    // Consecutive duplicate RRT endpoints are harmless geometrically but
+    // would produce a zero denominator in the spline parameterization.
+    std::vector<Angles> unique;
+    for (const auto& q : plan.waypoints) {
+        if (unique.empty() || distanceSquared(unique.back(), q) > 1e-12)
+            unique.push_back(q);
+    }
+    plan.waypoints = std::move(unique);
+    if (plan.waypoints.size() < 2) return plan;
+
+    const std::size_t count = plan.waypoints.size();
+    const std::size_t joints = plan.waypoints.front().size();
+    plan.pathDistances.assign(count, 0.0);
+    for (std::size_t i = 1; i < count; ++i)
+        plan.pathDistances[i] = plan.pathDistances[i - 1] +
+            std::sqrt(distanceSquared(plan.waypoints[i - 1], plan.waypoints[i]));
+    const double length = plan.pathDistances.back();
+
+    plan.splineTangents.assign(count, Angles(joints, 0.0));
+    for (std::size_t i = 1; i + 1 < count; ++i) {
+        double beforeAfterDot = 0.0;
+        for (std::size_t j = 0; j < joints; ++j) {
+            beforeAfterDot +=
+                (plan.waypoints[i][j] - plan.waypoints[i - 1][j]) *
+                (plan.waypoints[i + 1][j] - plan.waypoints[i][j]);
+        }
+        if (beforeAfterDot <= 0.0) continue;
+        const double span = plan.pathDistances[i + 1] -
+                            plan.pathDistances[i - 1];
+        for (std::size_t j = 0; j < joints; ++j)
+            plan.splineTangents[i][j] =
+                0.45 * (plan.waypoints[i + 1][j] -
+                        plan.waypoints[i - 1][j]) / span;
+    }
+
+    // Each candidate curve is validated using the same edge checker as the
+    // original RRT solution, including target-retreat and scene obstacles.
+    // If rounding a corner would leave free space, stop at that waypoint.
+    for (std::size_t attempt = 0; attempt <= count; ++attempt) {
+        if (c.cancelled()) {
+            plan.waypoints.clear();
+            plan.failure = PlanningFailure2D::Cancelled;
+            return plan;
+        }
+        bool safe = true;
+        bool changed = false;
+        for (std::size_t k = 0; k + 1 < count; ++k) {
+            const double h = plan.pathDistances[k + 1] - plan.pathDistances[k];
+            const int subdivisions = std::max(24,
+                static_cast<int>(std::ceil(h / 0.025)));
+            Angles previous = plan.waypoints[k];
+            for (int sample = 1; sample <= subdivisions; ++sample) {
+                const auto next = splinePose(
+                    plan.waypoints, plan.splineTangents, plan.pathDistances,
+                    k, static_cast<double>(sample) / subdivisions);
+                if (!c.edge(previous, next)) {
+                    safe = false;
+                    for (const std::size_t waypoint : {k, k + 1}) {
+                        if (waypoint == 0 || waypoint + 1 == count) continue;
+                        for (double& tangent : plan.splineTangents[waypoint]) {
+                            if (tangent != 0.0) changed = true;
+                            tangent = 0.0;
+                        }
+                    }
+                    break;
+                }
+                previous = next;
+            }
+            if (!safe) break;
+        }
+        if (safe) break;
+        if (!changed) {
+            plan.waypoints.clear();
+            plan.failure = c.cancelled() ? PlanningFailure2D::Cancelled :
+                                           PlanningFailure2D::PathSearchExhausted;
+            return plan;
+        }
+    }
+
+    // Analytic first/second/third derivatives of each quintic segment with
+    // respect to joint-space arc length. The global trajectory uses s=L*t/T.
+    // Conservative margins account for 60 Hz finite-difference estimates.
+    double duration = 2.0 / 60.0;
+    for (std::size_t k = 0; k + 1 < count; ++k) {
+        const double h = plan.pathDistances[k + 1] - plan.pathDistances[k];
+        for (std::size_t j = 0; j < joints; ++j) {
+            const double d = plan.waypoints[k + 1][j] -
+                             plan.waypoints[k][j];
+            const double m0 = h * plan.splineTangents[k][j];
+            const double m1 = h * plan.splineTangents[k + 1][j];
+            const double A = 10.0 * d - 6.0 * m0 - 4.0 * m1;
+            const double B = -15.0 * d + 8.0 * m0 + 7.0 * m1;
+            const double C = 6.0 * d - 3.0 * m0 - 3.0 * m1;
+            const double speed = std::min(c.settings.maxAngularSpeed,
+                                          c.limits[j].maxAngularSpeed);
+            const double acceleration =
+                std::min(c.settings.maxAngularAcceleration,
+                         c.limits[j].maxAngularAcceleration);
+            if (speed <= 0.0 || acceleration <= 0.0)
+                throw std::invalid_argument("Joint limits must be positive");
+
+            for (int sample = 0; sample <= 64; ++sample) {
+                const double u = static_cast<double>(sample) / 64.0;
+                const double u2 = u * u, u3 = u2 * u, u4 = u3 * u;
+                const double ds = std::abs(
+                    (m0 + 3.0 * A * u2 + 4.0 * B * u3 + 5.0 * C * u4) / h);
+                const double dss = std::abs(
+                    (6.0 * A * u + 12.0 * B * u2 + 20.0 * C * u3) / (h*h));
+                const double dsss = std::abs(
+                    (6.0 * A + 24.0 * B * u + 60.0 * C * u2) / (h*h*h));
+                duration = std::max(duration, 1.35 * length * ds / speed);
+                duration = std::max(duration, std::sqrt(
+                    1.8 * length * length * dss / acceleration));
+                duration = std::max(duration, std::cbrt(
+                    1.8 * length * length * length * dsss /
+                    c.settings.maxAngularJerk));
+            }
+        }
+    }
+    if (!std::isfinite(duration))
+        throw std::overflow_error("Trajectory duration overflow");
+    plan.trajectoryDuration = duration;
+    return plan;
+}
+
 void validate(const SearchContext& c, math::Vec2 target) {
     if (c.joints.size() < 2 || c.joints.size() != c.limits.size() ||
         !std::isfinite(target.x) || !std::isfinite(target.y) ||
@@ -355,6 +509,8 @@ void validate(const SearchContext& c, math::Vec2 target) {
         c.settings.targetClearance < 0.0 ||
         !std::isfinite(c.settings.obstacleClearance) ||
         c.settings.obstacleClearance < 0.0 ||
+        !std::isfinite(c.settings.maxAngularJerk) ||
+        c.settings.maxAngularJerk <= 0.0 ||
         !std::isfinite(c.settings.linkClearance) || c.settings.linkClearance < 0.0)
         throw std::invalid_argument("Planning requires >=2 joints, matching limits and finite target");
     for (std::size_t i = 0; i < c.joints.size(); ++i) {
@@ -452,7 +608,7 @@ PlannedJointPath2D planJointPath2D(std::span<const Joint2D> joints,
             if (!c.edge(start, goal)) continue;
             output.waypoints = {start, goal};
             output.terminalError = (target - c.positions(goal).back()).length();
-            return output;
+            return prepareTrajectory(c, std::move(output));
         }
         // When no direct transition is safe, search joint space for a detour.
         for (const auto& goal : goals) {
@@ -460,7 +616,7 @@ PlannedJointPath2D planJointPath2D(std::span<const Joint2D> joints,
             if (path.empty()) continue;
             output.waypoints = shorten(c, path);
             output.terminalError = (target - c.positions(goal).back()).length();
-            return output;
+            return prepareTrajectory(c, std::move(output));
         }
         output.failure = c.cancelled() ? PlanningFailure2D::Cancelled :
                          goals.empty() ? PlanningFailure2D::NoIKSolution :
@@ -493,7 +649,7 @@ PlannedJointPath2D planJointPath2D(std::span<const Joint2D> joints,
         if (path.empty()) continue;
         output.waypoints = shorten(c, path);
         output.terminalError = (target - c.positions(seed).back()).length();
-        return output;
+        return prepareTrajectory(c, std::move(output));
     }
     output.failure = c.cancelled() ? PlanningFailure2D::Cancelled :
                      foundGoal ? PlanningFailure2D::PathSearchExhausted :
@@ -518,6 +674,10 @@ void PlannedMotion2D::reset() noexcept {
     index_ = 0;
     segmentElapsed_ = 0.0;
     segmentDuration_ = 0.0;
+    splineTangents_.clear();
+    pathDistances_.clear();
+    trajectoryDuration_ = 0.0;
+    trajectoryElapsed_ = 0.0;
     hasTarget_ = false;
     failed_ = false;
     failure_ = PlanningFailure2D::None;
@@ -529,6 +689,10 @@ void PlannedMotion2D::usePlan(PlannedJointPath2D plan, math::Vec2 target) {
     failed_ = !plan.found();
     failure_ = plan.failure;
     path_ = std::move(plan.waypoints);
+    splineTangents_ = std::move(plan.splineTangents);
+    pathDistances_ = std::move(plan.pathDistances);
+    trajectoryDuration_ = plan.trajectoryDuration;
+    trajectoryElapsed_ = 0.0;
     index_ = path_.size() > 1 ? 1 : 0;
     segmentElapsed_ = 0.0;
     segmentDuration_ = 0.0;
@@ -560,6 +724,63 @@ MotionStatus2D PlannedMotion2D::advance(std::span<Joint2D> joints,
     if (path_.empty()) return status;
     if (index_ >= path_.size() || path_.size() == 1) {
         status.reached = status.positionError <= settings.positionTolerance;
+        return status;
+    }
+
+    // New C2 joint-space trajectory, prepared and collision-checked by
+    // the planner worker. All joints share the same global time parameter,
+    // so their movement cannot cut corners between RRT waypoints.
+    if (trajectoryDuration_ > 0.0 &&
+        pathDistances_.size() == path_.size() &&
+        splineTangents_.size() == path_.size()) {
+        const double elapsed = std::min(trajectoryDuration_,
+                                        trajectoryElapsed_ + dt);
+        const bool atGoal = elapsed >= trajectoryDuration_;
+        const double s = pathDistances_.back() * elapsed / trajectoryDuration_;
+        const auto upper = std::upper_bound(pathDistances_.begin(),
+                                             pathDistances_.end(), s);
+        const std::size_t index = std::min(
+            static_cast<std::size_t>(std::distance(pathDistances_.begin(), upper) -
+                                     (upper == pathDistances_.begin() ? 0 : 1)),
+            path_.size() - 2);
+        const double h = pathDistances_[index + 1] - pathDistances_[index];
+        const double u = std::clamp((s - pathDistances_[index]) / h, 0.0, 1.0);
+        const auto q = atGoal ? path_.back() : splinePose(
+            path_, splineTangents_, pathDistances_, index, u);
+
+        std::vector<Joint2D> proposed(joints.begin(), joints.end());
+        for (std::size_t j = 0; j < joints.size(); ++j) {
+            proposed[j].angle = q[j];
+            proposed[j].angularVelocity = atGoal ? 0.0 :
+                (q[j] - joints[j].angle) / dt;
+            const double speed = std::min(settings.maxAngularSpeed,
+                                          limits[j].maxAngularSpeed);
+            const double acceleration =
+                std::min(settings.maxAngularAcceleration,
+                         limits[j].maxAngularAcceleration);
+            if (std::abs(proposed[j].angularVelocity) > speed + 1e-7 ||
+                std::abs(proposed[j].angularVelocity -
+                         joints[j].angularVelocity) > acceleration * dt + 1e-7) {
+                failed_ = true;
+                status.blocked = true;
+                status.constrained = true;
+                for (auto& joint : joints) joint.angularVelocity = 0.0;
+                return status;
+            }
+        }
+        SearchContext context(joints, limits, settings, target_, obstacles);
+        if (!context.edge(context.angles(), q)) {
+            failed_ = true;
+            status.blocked = true;
+            status.constrained = true;
+            for (auto& joint : joints) joint.angularVelocity = 0.0;
+            return status;
+        }
+        std::copy(proposed.begin(), proposed.end(), joints.begin());
+        trajectoryElapsed_ = elapsed;
+        status.positionError = (target_ - forwardKinematics(joints).back()).length();
+        status.reached = atGoal &&
+                         status.positionError <= settings.positionTolerance;
         return status;
     }
 

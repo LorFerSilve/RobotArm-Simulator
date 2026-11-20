@@ -45,10 +45,11 @@ completeness and real-time replanning are not yet guaranteed.
       budget and goal sampling) without weakening collision checks.
 - [x] Run planning on a C++20 worker; cancel superseded jobs when targets,
       robot geometry, or obstacles change. Prevent stale results from applying.
-- [ ] Replace stop-at-waypoint quintic interpolation with continuous,
-      corner-blended, jerk-aware trajectories while preserving collision
-      clearance. The current coordinated follower is safe but briefly
-      stops at intermediate waypoints.
+- [x] Prepare C2 quintic Hermite trajectories with a shared time clock;
+      round intermediate corners only when each new curve is collision-free.
+      Respect per-joint speed/acceleration and a global jerk bound.
+- [ ] Improve curvature/jerk optimization and remove avoidable stops at
+      narrow corners that are currently conservatively rejected.
 - [ ] Preserve joint velocity/acceleration continuity across target changes
       while the previous plan is still executing.
 - [ ] Support controlled reconfiguration when feasible (including elbow-branch
@@ -133,9 +134,10 @@ completeness and real-time replanning are not yet guaranteed.
    presented as proof of geometric impossibility.
 3. **Planning pauses GUI rendering**: resolved with an asynchronous C++20
    worker and stop-token cancellation on new targets/scene changes.
-4. **Path corners may stop briefly**: the follower intentionally settles at
-   intermediate waypoints to avoid unsafe corner cutting. Smooth continuous
-   paths will require trajectory generation in Phase 3.
+4. **Path corners may stop briefly**: collision-validated quintic spline
+   rounding has been added. If the rounded corner is not provably safe
+   under the existing sampling checks, the joint-space tangent becomes zero
+   and the robot deliberately pauses at that waypoint.
 5. **Internal elbow-branch restriction**: internal joint ranges currently
    exclude the straight/folded poses; some physically possible transitions
    would require a more detailed geometric contact model.
