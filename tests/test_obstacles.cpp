@@ -127,6 +127,60 @@ int main() {
         }
         require(arrived, "Scene-aware follower did not reach the destination");
 
+        // Guaranteed geometric detour: shoulder must rotate the LONG way
+        // because the short arc sweeps its first link through a fixed circle.
+        // Both endpoints are collision-free and have the same elbow branch.
+        const double qStart = 0.3, qEnd = -0.2;
+        std::vector<Joint2D> detourArm{{2.0, qStart, 0.0},
+                                        {1.0, -pi / 2.0, 0.0}};
+        const auto detourEnd = std::vector<Joint2D>{
+            {2.0, qEnd, 0.0}, {1.0, -pi / 2.0, 0.0}
+        };
+        const Vec2 detourTarget = forwardKinematics(detourEnd).back();
+        const std::vector<Obstacle2D> detourScene{
+            Circle2D{{1.5 * std::cos(0.05), 1.5 * std::sin(0.05)}, 0.12}
+        };
+        require(!hasObstacleCollision(forwardKinematics(detourArm), detourScene, 0.1),
+                "Detour initial robot must be obstacle-free");
+        require(!hasObstacleCollision(forwardKinematics(detourEnd), detourScene, 0.1),
+                "Detour final robot must be obstacle-free");
+        auto mid = detourArm;
+        mid[0].angle = 0.05;
+        require(hasObstacleCollision(forwardKinematics(mid), detourScene, 0.1),
+                "Short shoulder rotation must collide with the scene");
+
+        const auto detour = planJointPath2D(detourArm, limits, detourTarget,
+                                             {}, detourScene);
+        require(detour.found(), "Planner must find long-way obstacle detour");
+        require(detour.waypoints.back()[0] > 5.0,
+                "Planner must choose the equivalent full-turn shoulder angle");
+        for (std::size_t k = 1; k < detour.waypoints.size(); ++k) {
+            for (int j = 0; j <= 150; ++j) {
+                auto intermediate = detourArm;
+                const double t = static_cast<double>(j) / 150.0;
+                for (std::size_t i = 0; i < intermediate.size(); ++i)
+                    intermediate[i].angle =
+                        (1.0-t)*detour.waypoints[k-1][i]+t*detour.waypoints[k][i];
+                require(!hasObstacleCollision(forwardKinematics(intermediate),
+                                               detourScene, 0.1),
+                        "Planned obstacle detour crosses an obstacle");
+            }
+        }
+        PlannedMotion2D detourFollower;
+        detourFollower.setTarget(detourArm, limits, detourTarget, {}, detourScene);
+        require(detourFollower.pathAvailable(), "Detour follower lacks a path");
+        bool completed = false;
+        for (int frame = 0; frame < 2000; ++frame) {
+            const auto result = detourFollower.advance(
+                detourArm, limits, 1.0/60.0, {}, detourScene);
+            require(!result.blocked, "Detour follower blocked by obstacle");
+            require(!hasObstacleCollision(forwardKinematics(detourArm),
+                                           detourScene, 0.1),
+                    "Executed obstacle detour caused a collision");
+            if (result.reached) { completed = true; break; }
+        }
+        require(completed, "End effector did not finish obstacle detour");
+
         std::cout << "Obstacle geometry, planning and execution passed\n";
     } catch (const std::exception& error) {
         std::cerr << "FAILED: " << error.what() << '\n';

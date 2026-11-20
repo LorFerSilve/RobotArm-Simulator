@@ -329,4 +329,6 @@ background replanning and continuous collision detection remain future work.
 
 The new `Obstacles2D` CTest checks geometry, clearances, impossible targets,
 invalid starting configurations, the planner and the actual follower.
+It also verifies a known reachable **long-way obstacle detour** where the
+shorter shoulder rotation crosses a circle.
 The existing 120-case and 600-case motion matrix tests still run in CI.
