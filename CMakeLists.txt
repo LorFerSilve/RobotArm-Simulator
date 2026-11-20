@@ -136,3 +136,8 @@ add_test(NAME TrajectoryPreview2D COMMAND test_trajectory_preview)
 add_executable(test_cartesian_optimization tests/test_cartesian_optimization.cpp)
 target_link_libraries(test_cartesian_optimization PRIVATE robotics_core)
 add_test(NAME CartesianTipOptimization COMMAND test_cartesian_optimization)
+
+# Optimized end-effector distance around obstacles, with scene-motion safety.
+add_executable(test_obstacle_tip_optimization tests/test_obstacle_tip_optimization.cpp)
+target_link_libraries(test_obstacle_tip_optimization PRIVATE robotics_core)
+add_test(NAME ObstacleTipOptimization COMMAND test_obstacle_tip_optimization)

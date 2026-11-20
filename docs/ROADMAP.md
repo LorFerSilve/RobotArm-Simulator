@@ -50,8 +50,13 @@ completeness and real-time replanning are not yet guaranteed.
       inner workspace limitations without falsely blaming the search budget.
 - [ ] Add adaptive RRT budgets and objective-aware multi-start search for
       constrained environments where Cartesian lifting fails.
-- [ ] Optimize Cartesian travel more globally through obstacles (the new
-      safe straight-line preference is a heuristic, not a global optimum).
+- [x] Apply bounded Cartesian-distance shortcutting to RRT paths, accepting
+      only collision-checked transitions that reduce end-effector travel.
+- [x] In obstructed scenes, compare several safe RRT routes / IK endpoints
+      and choose the lowest-cost fully prepared trajectory.
+- [ ] Explore globally stronger cost-aware planning (e.g. asymptotically
+      optimal RRT* or informed sampling). The current method is a bounded
+      local improvement, not a guarantee of a global optimum.
 - [x] Run planning on a C++20 worker; cancel superseded jobs when targets,
       robot geometry, or obstacles change. Prevent stale results from applying.
 - [x] Prepare C2 quintic Hermite trajectories with a shared time clock;

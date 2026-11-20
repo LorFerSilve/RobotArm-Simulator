@@ -448,3 +448,33 @@ The `CartesianTipOptimization` regression compares tip travel against
 the original direct joint interpolation, verifies a near-straight
 collision-free motion, and checks correct diagnostics for the reported
 shoulder-barrier scenario and an unreachable inner workspace.
+
+## Objective-aware Cartesian path shortening around obstacles
+
+When a nearly straight Cartesian IK lift is blocked, the bounded RRT
+fallback no longer uses the **farthest possible joint-space shortcut**
+as its only simplification. It now evaluates shortcuts by the actual
+distance travelled by the end effector during the proposed
+joint-space interpolation, sampled through forward kinematics.
+
+A shortcut is accepted **only** if it reduces the Cartesian tool-travel
+objective by at least 2 mm and the existing full edge checker validates
+joint ranges, branch/folding limits, target-object clearance, self-contact
+and all scene obstacles. A bounded number of deterministic passes and
+collision checks keeps the optimizer responsive in the background worker.
+It retains the original validated path if no cost-improving shortcut exists.
+
+In obstructed scenes, the solver also compares several independently
+found RRT paths/IK endpoints instead of taking the first success:
+up to four RRT route candidates for two joints or three successful
+multi-joint candidates. The selected result is the **lowest sampled tool
+travel distance of the successfully prepared, validated candidates**,
+including spline smoothing or its safe fallback.
+
+This is *local bounded optimization*, **not a guarantee of globally
+shortest path**. A narrow passage may require a temporary detour.
+All movement safety checks and the previous 600-motion release stress
+suite remain active. The `ObstacleTipOptimization` regression includes
+a circle that blocks a short shoulder turn, compares the selected route
+against a known-safe full-turn route, checks a redundant-arm obstacle
+scenario, and executes both trajectories frame by frame.

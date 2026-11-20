@@ -398,19 +398,78 @@ int extend(std::vector<Node>& tree, const Angles& target, const SearchContext& c
     return {};
 }
 
-[[nodiscard]] std::vector<Angles> shorten(const SearchContext& c,
-                                          const std::vector<Angles>& path) {
-    if (path.size() < 3) return path;
-    std::vector<Angles> simplified{path.front()};
-    std::size_t i = 0;
-    while (i + 1 < path.size()) {
-        if (c.cancelled()) return {};
-        std::size_t next = path.size() - 1;
-        while (next > i + 1 && !c.edge(path[i], path[next])) --next;
-        simplified.push_back(path[next]);
-        i = next;
+// Approximate Cartesian arc length of one STRAIGHT JOINT-SPACE edge.
+// Sampling is bounded by the maximum possible tool travel, so a 360 degree
+// shoulder turn is not mistaken for a straight tool movement.
+[[nodiscard]] double tipDistanceAlongEdge(
+    const SearchContext& c, const Angles& a, const Angles& b) {
+    double distalReach = 0.0;
+    double travelBound = 0.0;
+    for (std::size_t i = a.size(); i-- > 0;) {
+        distalReach += c.joints[i].length;
+        travelBound += distalReach * std::abs(b[i] - a[i]);
     }
-    return simplified;
+    const int samples = std::clamp(
+        static_cast<int>(std::ceil(travelBound / 0.06)), 8, 384);
+    math::Vec2 previous = c.positions(a).back();
+    double total = 0.0;
+    Angles q(a.size());
+    for (int step = 1; step <= samples; ++step) {
+        if (c.cancelled()) return std::numeric_limits<double>::infinity();
+        const double t = static_cast<double>(step) / samples;
+        for (std::size_t j = 0; j < a.size(); ++j)
+            q[j] = a[j] + t * (b[j] - a[j]);
+        const auto point = c.positions(q).back();
+        total += (point - previous).length();
+        previous = point;
+    }
+    return total;
+}
+
+// Local, objective-aware shortcutting of RRT waypoints. Unlike the old greedy
+// farthest-joint-space shortcut, this preserves the route unless it actually
+// REDUCES Cartesian travel. All accepted new edges pass the SAME swept-edge
+// collision and target-contact checks as RRT and the trajectory follower.
+[[nodiscard]] std::vector<Angles> shorten(
+    const SearchContext& c, std::vector<Angles> path) {
+    constexpr int maxPasses = 5;
+    constexpr int maxEdgeChecksPerPass = 96;
+    constexpr double improvementThreshold = 0.002; // metres
+
+    for (int pass = 0; pass < maxPasses && path.size() > 2; ++pass) {
+        if (c.cancelled()) return {};
+        std::vector<double> prefix(path.size(), 0.0);
+        for (std::size_t i = 1; i < path.size(); ++i) {
+            prefix[i] = prefix[i - 1] +
+                tipDistanceAlongEdge(c, path[i - 1], path[i]);
+        }
+
+        double bestGain = improvementThreshold;
+        std::size_t bestFrom = 0, bestTo = 0;
+        int inspected = 0;
+        // Larger skips first; assess their actual tool-length saving, not
+        // their index span or Euclidean distance between joint vectors.
+        for (std::size_t gap = path.size() - 1; gap > 1; --gap) {
+            for (std::size_t from = 0; from + gap < path.size(); ++from) {
+                if (c.cancelled()) return {};
+                const std::size_t to = from + gap;
+                const double replacement =
+                    tipDistanceAlongEdge(c, path[from], path[to]);
+                const double saving = prefix[to] - prefix[from] - replacement;
+                if (saving > bestGain && c.edge(path[from], path[to])) {
+                    bestGain = saving;
+                    bestFrom = from;
+                    bestTo = to;
+                }
+                if (++inspected >= maxEdgeChecksPerPass) break;
+            }
+            if (inspected >= maxEdgeChecksPerPass) break;
+        }
+        if (bestTo <= bestFrom + 1) break;
+        path.erase(path.begin() + static_cast<std::ptrdiff_t>(bestFrom + 1),
+                   path.begin() + static_cast<std::ptrdiff_t>(bestTo));
+    }
+    return path;
 }
 
 // Quintic Hermite curve in joint space with position, shared tangent and
@@ -765,13 +824,34 @@ PlannedJointPath2D planJointPath2D(std::span<const Joint2D> joints,
             if (c.cancelled()) break;
             if (c.edge(start, goal)) consider({start, goal});
         }
-        if (best.found()) return best;
+        const double directLowerBound = (target - c.positions(start).back()).length();
+        // In a free scene, the existing direct/Cartesian choice is sufficient.
+        // With obstacles, a valid direct joint-space edge may still trace a
+        // wide Cartesian arc; compare it with a few safe RRT alternatives.
+        if (best.found() &&
+            (obstacles.empty() || bestDistance <= directLowerBound * 1.03))
+            return best;
 
-        // Only call RRT if direct and straight-Cartesian candidates failed.
+        constexpr int variantsPerGoal = 2;
+        constexpr int maxRrtCandidates = 4;
+        int candidates = 0;
         for (const auto& goal : goals) {
-            if (c.cancelled()) break;
-            auto path = connectPath(c, start, goal, rng);
-            if (!path.empty()) consider(shorten(c, path));
+            for (int variant = 0; variant < variantsPerGoal; ++variant) {
+                if (c.cancelled() || candidates >= maxRrtCandidates ||
+                    (best.found() && bestDistance <= directLowerBound * 1.03))
+                    break;
+                const auto path = connectPath(c, start, goal, rng);
+                if (path.empty()) continue;
+                ++candidates;
+                consider(shorten(c, path));
+            }
+            if (c.cancelled() || candidates >= maxRrtCandidates ||
+                (best.found() && bestDistance <= directLowerBound * 1.03))
+                break;
+        }
+        if (c.cancelled()) {
+            output.failure = PlanningFailure2D::Cancelled;
+            return output;
         }
         if (best.found()) return best;
         output.failure = c.cancelled() ? PlanningFailure2D::Cancelled :
@@ -793,14 +873,27 @@ PlannedJointPath2D planJointPath2D(std::span<const Joint2D> joints,
         return withEndEffectorTrace(c, prepareTrajectory(c, std::move(output)));
     }
 
-    // Prioritize the original configuration; use other sampled joint states
-    // when the straightforward IK basin or a direct edge is blocked.
+    // Redundant arms may have many collision-free IK endpoints. In an
+    // obstructed scene, the first discovered RRT route can be much longer
+    // than another valid route to the very same Cartesian target.
+    //
+    // Compare at most three successful alternatives, and stop searching
+    // after a small bounded window beyond the first success. This keeps the
+    // asynchronous GUI responsive and avoids unbounded "optimization".
     bool foundGoal = false;
+    PlannedJointPath2D best;
+    double bestDistance = std::numeric_limits<double>::infinity();
+    const double directLowerBound = (target - c.positions(start).back()).length();
+    int firstSuccessAttempt = -1;
+    int routesFound = 0;
     for (int attempt = 0; attempt < 70; ++attempt) {
         if (c.cancelled()) {
             output.failure = PlanningFailure2D::Cancelled;
             return output;
         }
+        if (firstSuccessAttempt >= 0 &&
+            (routesFound >= 3 || attempt > firstSuccessAttempt + 10))
+            break;
         Angles seed = start;
         if (attempt != 0) {
             for (std::size_t i = 0; i < seed.size(); ++i) {
@@ -814,14 +907,35 @@ PlannedJointPath2D planJointPath2D(std::span<const Joint2D> joints,
         }
         if (!c.validJointAngles(seed) || !refineIK(c, seed, target)) continue;
         foundGoal = true;
-        const auto path = connectPath(c, start, seed, rng);
+        auto path = connectPath(c, start, seed, rng);
         if (path.empty()) continue;
-        output.waypoints = shorten(c, path);
-        output.terminalError = (target - c.positions(seed).back()).length();
-        return withEndEffectorTrace(c, prepareTrajectory(c, std::move(output)));
+        if (firstSuccessAttempt < 0) firstSuccessAttempt = attempt;
+        ++routesFound;
+
+        PlannedJointPath2D candidate;
+        candidate.waypoints = shorten(c, std::move(path));
+        if (candidate.waypoints.empty()) continue;
+        candidate.terminalError =
+            (target - c.positions(candidate.waypoints.back()).back()).length();
+        candidate = withEndEffectorTrace(
+            c, prepareTrajectory(c, std::move(candidate)));
+        if (candidate.found() &&
+            candidate.endEffectorDistance < bestDistance) {
+            bestDistance = candidate.endEffectorDistance;
+            best = std::move(candidate);
+        }
+
+        if (best.found() &&
+            (bestDistance <= directLowerBound * 1.03 ||
+             (obstacles.empty() && routesFound >= 1)))
+            break;
     }
-    output.failure = c.cancelled() ? PlanningFailure2D::Cancelled :
-                     foundGoal ? PlanningFailure2D::PathSearchExhausted :
+    if (c.cancelled()) {
+        output.failure = PlanningFailure2D::Cancelled;
+        return output;
+    }
+    if (best.found()) return best;
+    output.failure = foundGoal ? PlanningFailure2D::PathSearchExhausted :
                                  PlanningFailure2D::NoIKSolution;
     return output;
 }
