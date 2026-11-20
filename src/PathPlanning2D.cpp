@@ -23,11 +23,12 @@ struct SearchContext {
     std::vector<Joint2D> joints;
     std::vector<JointLimits2D> limits;
     const MotionSettings2D& settings;
+    math::Vec2 target;
 
     explicit SearchContext(std::span<const Joint2D> state,
                            std::span<const JointLimits2D> bounds,
-                           const MotionSettings2D& s)
-        : joints(state.begin(), state.end()), limits(bounds.begin(), bounds.end()), settings(s) {}
+                           const MotionSettings2D& s, math::Vec2 goal)
+        : joints(state.begin(), state.end()), limits(bounds.begin(), bounds.end()), settings(s), target(goal) {}
 
     [[nodiscard]] Angles angles() const {
         Angles q;
@@ -42,7 +43,7 @@ struct SearchContext {
         return forwardKinematics(robot);
     }
 
-    [[nodiscard]] bool valid(const Angles& q) const {
+    [[nodiscard]] bool validRobot(const Angles& q) const {
         if (q.size() != joints.size()) return false;
         for (std::size_t i = 0; i < q.size(); ++i) {
             if (!std::isfinite(q[i]) || q[i] < limits[i].minAngle ||
@@ -50,13 +51,18 @@ struct SearchContext {
             if (i > 0) {
                 const bool negative = std::signbit(joints[i].angle);
                 if ((negative && (q[i] > -settings.jointClearance ||
-                                  q[i] < -pi + settings.jointClearance)) ||
+                                  q[i] < -pi + settings.foldClearance)) ||
                     (!negative && (q[i] < settings.jointClearance ||
-                                   q[i] > pi - settings.jointClearance)))
+                                   q[i] > pi - settings.foldClearance)))
                     return false;
             }
         }
         return !hasSelfCollision(positions(q), settings.linkClearance);
+    }
+
+    [[nodiscard]] bool valid(const Angles& q) const {
+        return validRobot(q) &&
+               targetApproachClear(positions(q), target, settings.targetClearance);
     }
 
     [[nodiscard]] bool edge(const Angles& a, const Angles& b) const {
@@ -237,6 +243,11 @@ void validate(const SearchContext& c, math::Vec2 target) {
         !std::isfinite(c.settings.positionTolerance) || c.settings.positionTolerance <= 0.0 ||
         !std::isfinite(c.settings.jointClearance) || c.settings.jointClearance <= 0.0 ||
         c.settings.jointClearance >= pi / 2.0 ||
+        !std::isfinite(c.settings.foldClearance) ||
+        c.settings.foldClearance < c.settings.jointClearance ||
+        c.settings.foldClearance >= pi / 2.0 ||
+        !std::isfinite(c.settings.targetClearance) ||
+        c.settings.targetClearance < 0.0 ||
         !std::isfinite(c.settings.linkClearance) || c.settings.linkClearance < 0.0)
         throw std::invalid_argument("Planning requires >=3 joints, matching limits and finite target");
     for (std::size_t i = 0; i < c.joints.size(); ++i) {
@@ -246,7 +257,7 @@ void validate(const SearchContext& c, math::Vec2 target) {
             !std::isfinite(bound.minAngle) || !std::isfinite(bound.maxAngle) ||
             bound.minAngle >= bound.maxAngle) throw std::invalid_argument("Invalid robot geometry or limits");
     }
-    if (!c.valid(c.angles())) throw std::invalid_argument("Cannot plan from an invalid starting pose");
+    if (!c.validRobot(c.angles())) throw std::invalid_argument("Cannot plan from an invalid starting pose");
 }
 
 } // namespace
@@ -255,10 +266,11 @@ PlannedJointPath2D planJointPath2D(std::span<const Joint2D> joints,
                                    std::span<const JointLimits2D> limits,
                                    math::Vec2 target,
                                    const MotionSettings2D& settings) {
-    SearchContext c(joints, limits, settings);
+    SearchContext c(joints, limits, settings, target);
     validate(c, target);
     const Angles start = c.angles();
     PlannedJointPath2D output;
+    if (!c.valid(start)) return output; // Target already intersects the arm.
     output.terminalError = (target - c.positions(start).back()).length();
     if (output.terminalError <= settings.positionTolerance) {
         output.waypoints = {start};
@@ -365,7 +377,7 @@ MotionStatus2D PlannedMotion2D::advance(std::span<Joint2D> joints,
             candidate[i].angularVelocity = (candidate[i].angle - joints[i].angle) / dt;
         }
     }
-    SearchContext c(joints, limits, settings);
+    SearchContext c(joints, limits, settings, target_);
     if (!c.edge(c.angles(), [&]() {
             Angles q;
             for (const auto& joint : candidate) q.push_back(joint.angle);

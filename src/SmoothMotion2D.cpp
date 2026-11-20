@@ -46,11 +46,12 @@ double segmentDistance(math::Vec2 a, math::Vec2 b, math::Vec2 c, math::Vec2 d) {
 
 // Keep each internal joint on its original branch and away from collinearity.
 bool allowedAngles(std::span<const Joint2D> current,
-                   std::span<const Joint2D> next, double margin) {
+                   std::span<const Joint2D> next, double straightMargin,
+                   double foldMargin) {
     for (std::size_t i = 1; i < current.size(); ++i) {
         const double sign = std::signbit(current[i].angle) ? -1.0 : 1.0;
         const double folded = sign * next[i].angle;
-        if (folded < margin || folded > pi - margin) return false;
+        if (folded < straightMargin || folded > pi - foldMargin) return false;
     }
     return true;
 }
@@ -83,14 +84,14 @@ double servoVelocity(double angle, double goal, double velocity,
 
 // Closed-form two-link IK, preserving the current elbow branch.
 std::vector<double> analyticTwoLinkPose(std::span<const Joint2D> joints,
-                                        math::Vec2 target, double margin,
-                                        math::Vec2 tip) {
+                                        math::Vec2 target, double straightMargin,
+                                        double foldMargin, math::Vec2 tip) {
     const double l1 = joints[0].length, l2 = joints[1].length;
     const double r = target.length();
-    const double minR = std::hypot(l1 + l2 * std::cos(pi - margin),
-                                  l2 * std::sin(pi - margin));
-    const double maxR = std::hypot(l1 + l2 * std::cos(margin),
-                                  l2 * std::sin(margin));
+    const double minR = std::hypot(l1 + l2 * std::cos(pi - foldMargin),
+                                  l2 * std::sin(pi - foldMargin));
+    const double maxR = std::hypot(l1 + l2 * std::cos(straightMargin),
+                                  l2 * std::sin(straightMargin));
     const double clampedR = std::clamp(r, minR, maxR);
     const double bearing = r > 0.01 ? std::atan2(target.y, target.x)
                                     : std::atan2(tip.y, tip.x);
@@ -105,6 +106,28 @@ std::vector<double> analyticTwoLinkPose(std::span<const Joint2D> joints,
 }
 
 } // namespace
+
+bool targetApproachClear(std::span<const math::Vec2> positions,
+                         math::Vec2 target, double clearance) {
+    if (positions.size() < 2 || !finite(target) || !std::isfinite(clearance) ||
+        clearance < 0.0)
+        throw std::invalid_argument("Invalid target approach geometry");
+    if (clearance == 0.0) return true;
+    for (const auto& point : positions)
+        if (!finite(point)) throw std::invalid_argument("Invalid arm point");
+
+    // The target is a physical object: every segment except the last must
+    // remain outside its clearance disk.
+    for (std::size_t i = 1; i + 1 < positions.size(); ++i) {
+        if (pointDistance(target, positions[i - 1], positions[i]) <= clearance)
+            return false;
+    }
+    // The last small zone surrounding the end effector acts as the tool.
+    // Do not allow the body of the last link to touch the target earlier.
+    return !(pointDistance(target, positions[positions.size() - 2],
+                           positions.back()) <= clearance &&
+             (target - positions.back()).length() > 2.0 * clearance);
+}
 
 bool hasSelfCollision(std::span<const math::Vec2> positions, double clearance) {
     if (!std::isfinite(clearance) || clearance < 0.0)
@@ -131,7 +154,12 @@ MotionStatus2D advanceTowardTarget(std::span<Joint2D> joints, math::Vec2 target,
         !std::isfinite(options.maxAngularSpeed) || options.maxAngularSpeed <= 0.0 ||
         !std::isfinite(options.maxAngularAcceleration) || options.maxAngularAcceleration <= 0.0 ||
         !std::isfinite(options.jointClearance) || options.jointClearance <= 0.0 ||
-        options.jointClearance >= pi / 2.0 || !std::isfinite(options.linkClearance) ||
+        options.jointClearance >= pi / 2.0 ||
+        !std::isfinite(options.foldClearance) ||
+        options.foldClearance < options.jointClearance ||
+        options.foldClearance >= pi / 2.0 ||
+        !std::isfinite(options.targetClearance) || options.targetClearance < 0.0 ||
+        !std::isfinite(options.linkClearance) ||
         options.linkClearance < 0.0 || !std::isfinite(options.positionTolerance) ||
         options.positionTolerance <= 0.0) {
         throw std::invalid_argument("Invalid motion parameters");
@@ -159,7 +187,7 @@ MotionStatus2D advanceTowardTarget(std::span<Joint2D> joints, math::Vec2 target,
     }
     if (!std::isfinite(totalLength)) throw std::overflow_error("Invalid arm reach");
     const auto positions = forwardKinematics(joints);
-    if (!allowedAngles(joints, joints, options.jointClearance) ||
+    if (!allowedAngles(joints, joints, options.jointClearance, options.foldClearance) ||
         hasSelfCollision(positions, options.linkClearance))
         throw std::invalid_argument("Robot starts in an unsafe configuration");
 
@@ -169,13 +197,18 @@ MotionStatus2D advanceTowardTarget(std::span<Joint2D> joints, math::Vec2 target,
         throw std::overflow_error("Target position error overflow");
     status.reached = status.positionError <= options.positionTolerance;
     status.outOfReach = target.length() > totalLength;
+    if (!targetApproachClear(positions, target, options.targetClearance)) {
+        status.blocked = true;
+        for (auto& joint : joints) joint.angularVelocity = 0.0;
+        return status;
+    }
     if (joints.size() == 2) {
         const auto pose = analyticTwoLinkPose(
-            joints, target, options.jointClearance, positions.back());
+            joints, target, options.jointClearance, options.foldClearance, positions.back());
         const double targetRadius = target.length();
         const double minRadius = std::hypot(joints[0].length + joints[1].length *
-                         std::cos(pi - options.jointClearance),
-                         joints[1].length * std::sin(pi - options.jointClearance));
+                         std::cos(pi - options.foldClearance),
+                         joints[1].length * std::sin(pi - options.foldClearance));
         const double maxRadius = std::hypot(joints[0].length + joints[1].length *
                          std::cos(options.jointClearance),
                          joints[1].length * std::sin(options.jointClearance));
@@ -211,13 +244,33 @@ MotionStatus2D advanceTowardTarget(std::span<Joint2D> joints, math::Vec2 target,
             proposal[i].angle = nextAngle;
             proposal[i].angularVelocity = speed;
         }
-        if (!allowedAngles(joints, proposal, options.jointClearance - 1e-9)) {
+        if (!allowedAngles(joints, proposal, options.jointClearance - 1e-9,
+                           options.foldClearance - 1e-9)) {
             status.constrained = true;
             // Handle roundoff at the configured elbow margin.
             proposal[1].angle = std::clamp(proposal[1].angle,
-                std::signbit(joints[1].angle) ? -pi + options.jointClearance : options.jointClearance,
-                std::signbit(joints[1].angle) ? -options.jointClearance : pi - options.jointClearance);
+                std::signbit(joints[1].angle) ? -pi + options.foldClearance : options.jointClearance,
+                std::signbit(joints[1].angle) ? -options.jointClearance : pi - options.foldClearance);
             proposal[1].angularVelocity = (proposal[1].angle - joints[1].angle) / dt;
+        }
+        // Guard the entire per-frame sweep, not only the proposed endpoint.
+        // If the selected target lies on the arm, stop safely instead of
+        // pushing an intermediate link through the object.
+        if (options.targetClearance > 0.0) {
+            std::vector<Joint2D> sweep(joints.begin(), joints.end());
+            for (int sub = 1; sub <= 8; ++sub) {
+                for (std::size_t i = 0; i < joints.size(); ++i)
+                    sweep[i].angle = joints[i].angle +
+                        (proposal[i].angle - joints[i].angle) *
+                        (static_cast<double>(sub) / 8.0);
+                if (!targetApproachClear(forwardKinematics(sweep), target,
+                                         options.targetClearance)) {
+                    status.blocked = true;
+                    status.constrained = true;
+                    for (auto& joint : joints) joint.angularVelocity = 0.0;
+                    return status;
+                }
+            }
         }
         std::copy(proposal.begin(), proposal.end(), joints.begin());
     } else {
@@ -253,9 +306,12 @@ MotionStatus2D advanceTowardTarget(std::span<Joint2D> joints, math::Vec2 target,
                     intermediate[i].angle += proposal[i].angularVelocity * dt * scale *
                                              (static_cast<double>(sub) / 4.0);
                 }
-                if (!allowedAngles(joints, intermediate, options.jointClearance) ||
+                if (!allowedAngles(joints, intermediate, options.jointClearance,
+                                   options.foldClearance) ||
                     !withinLimits(intermediate, limits) ||
-                    hasSelfCollision(forwardKinematics(intermediate), options.linkClearance)) {
+                    hasSelfCollision(forwardKinematics(intermediate), options.linkClearance) ||
+                    !targetApproachClear(forwardKinematics(intermediate), target,
+                                         options.targetClearance)) {
                     safe = false;
                     break;
                 }

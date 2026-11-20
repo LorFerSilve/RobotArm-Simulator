@@ -12,7 +12,10 @@ Robot2D makeRobot2D(std::span<const JointDefinition2D> definition,
                     const MotionSettings2D& settings) {
     if (definition.size() < 2 || !std::isfinite(settings.jointClearance) ||
         settings.jointClearance <= 0.0 ||
-        settings.jointClearance >= std::numbers::pi / 2.0)
+        settings.jointClearance >= std::numbers::pi / 2.0 ||
+        !std::isfinite(settings.foldClearance) ||
+        settings.foldClearance < settings.jointClearance ||
+        settings.foldClearance >= std::numbers::pi / 2.0)
         throw std::invalid_argument("Robot needs at least two joints and valid clearance");
 
     Robot2D result;
@@ -37,8 +40,8 @@ Robot2D makeRobot2D(std::span<const JointDefinition2D> definition,
         if (i > 0) {
             const double m = settings.jointClearance;
             const bool positive = bounds.minAngle >= m &&
-                                  bounds.maxAngle <= std::numbers::pi - m;
-            const bool negative = bounds.minAngle >= -std::numbers::pi + m &&
+                                  bounds.maxAngle <= std::numbers::pi - settings.foldClearance;
+            const bool negative = bounds.minAngle >= -std::numbers::pi + settings.foldClearance &&
                                   bounds.maxAngle <= -m;
             if (!positive && !negative)
                 throw std::invalid_argument("Internal joint limits must stay on one safe elbow branch");

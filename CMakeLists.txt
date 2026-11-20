@@ -79,3 +79,7 @@ add_test(NAME JointLimits2D COMMAND test_joint_limits)
 add_executable(test_path_planning tests/test_path_planning.cpp)
 target_link_libraries(test_path_planning PRIVATE robotics_core)
 add_test(NAME PathPlanning2D COMMAND test_path_planning)
+
+add_executable(test_target_safety tests/test_target_safety.cpp)
+target_link_libraries(test_target_safety PRIVATE robotics_core)
+add_test(NAME TargetSafety2D COMMAND test_target_safety)

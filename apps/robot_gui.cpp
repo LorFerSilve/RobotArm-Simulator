@@ -47,10 +47,11 @@ constexpr std::size_t maxGuiJoints = 6;
 
 JointDefinition2D makeNewLink(bool positiveBranch) {
     const double margin = 0.16;
+    const double foldMargin = 0.56; // GUI physical folding clearance
     const double angle = positiveBranch ? 0.85 : -0.85;
     return {0.7, angle,
-            {positiveBranch ? margin : -std::numbers::pi + margin,
-             positiveBranch ? std::numbers::pi - margin : -margin,
+            {positiveBranch ? margin : -std::numbers::pi + foldMargin,
+             positiveBranch ? std::numbers::pi - foldMargin : -margin,
              2.0, 6.0}};
 }
 
@@ -58,12 +59,12 @@ std::vector<JointDefinition2D> makePreset(int count) {
     const JointDefinition2D base{2.0, std::numbers::pi / 2.0,
         {-2.0 * std::numbers::pi, 2.0 * std::numbers::pi, 2.0, 6.0}};
     const JointDefinition2D elbow{1.0, -std::numbers::pi / 2.0,
-        {-std::numbers::pi + 0.16, -0.16, 2.0, 6.0}};
+        {-std::numbers::pi + 0.56, -0.16, 2.0, 6.0}};
     if (count == 2) return {base, elbow};
     return {
         {1.25, 0.3, base.limits},
         {0.75, -0.7, elbow.limits},
-        {1.1, 0.8, {0.16, std::numbers::pi - 0.16, 2.0, 6.0}}
+        {1.1, 0.8, {0.16, std::numbers::pi - 0.56, 2.0, 6.0}}
     };
 }
 
@@ -304,7 +305,12 @@ int main() {
     SetTargetFPS(60);
 
     int jointCount = 2;
-    const robotics::kinematics::MotionSettings2D motionSettings{};
+    const robotics::kinematics::MotionSettings2D motionSettings = [] {
+        robotics::kinematics::MotionSettings2D settings{};
+        settings.foldClearance = 0.55; // about 31.5 degrees away from a full fold
+        settings.targetClearance = 0.16; // target body/arm clearance, metres
+        return settings;
+    }();
     auto appliedDefinition = makePreset(jointCount);
     auto draft = appliedDefinition;
     Robot2D robot = makeRobot2D(appliedDefinition, motionSettings);
@@ -411,8 +417,8 @@ int main() {
         if (joints.size() == 2) {
             const double margin = motionSettings.jointClearance;
             const double innerRadius = std::hypot(joints[0].length + joints[1].length *
-                std::cos(std::numbers::pi - margin), joints[1].length *
-                std::sin(std::numbers::pi - margin));
+                std::cos(std::numbers::pi - motionSettings.foldClearance), joints[1].length *
+                std::sin(std::numbers::pi - motionSettings.foldClearance));
             const double outerRadius = std::hypot(joints[0].length + joints[1].length *
                 std::cos(margin), joints[1].length * std::sin(margin));
             unreachable = radius < innerRadius || radius > outerRadius;

@@ -12,6 +12,8 @@ struct MotionSettings2D {
     double maxAngularAcceleration{6.0}; // rad/s^2
     double jointClearance{0.14};        // radians from straight/folded singular poses
     double linkClearance{0.10};         // metres between nonadjacent links
+    double foldClearance{0.14};        // minimum angle away from a complete fold
+    double targetClearance{0.0};       // optional target-object radius, metres
     double positionTolerance{0.005};  // metres
 };
 
@@ -40,6 +42,12 @@ struct MotionStatus2D {
     std::span<Joint2D> joints, math::Vec2 target, double dt,
     const MotionSettings2D& settings = {},
     std::span<const JointLimits2D> limits = {});
+
+// The target represents a small physical object. Links except the tool-end
+// must keep clearance; the final link can approach within the tool-tip zone.
+// Clearance zero disables the target-object check for legacy simulations.
+[[nodiscard]] bool targetApproachClear(std::span<const math::Vec2> positions,
+                                       math::Vec2 target, double clearance);
 
 [[nodiscard]] bool hasSelfCollision(std::span<const math::Vec2> positions,
                                     double clearance);

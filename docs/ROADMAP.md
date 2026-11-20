@@ -49,6 +49,23 @@ the simulator grows. See the root README for build and usage instructions.
 - [ ] Spatial Jacobians, orientation targets and 3D IK.
 - [ ] Extend collision detection and motion planning to 3D.
 
+## Recent playtest safety fixes and remaining constraints
+
+- [x] **Intermediate links passing through the target point:** introduce a
+      target-object keep-out radius and check each planned configuration,
+      interpolated path edge, and executed step. Model the final tool-tip
+      region separately so the end effector can still reach the goal.
+- [x] **Arms folding unnaturally tightly:** use a larger folding margin
+      in the GUI, reject configurations violating that margin, and constrain
+      planner paths to the same safe angular region.
+- [ ] **Target-object geometry:** replace the current target-circle/tool-tip
+      approximation with user-configurable object sizes, tool geometry,
+      continuous swept-volume collision checks, and approach direction.
+- [ ] **Safety-aware replanning:** if the target is underneath the current
+      arm or the selected elbow branch cannot reach it safely, report an
+      actionable blocked state and search more configuration-space alternatives.
+      Do not solve this by relaxing collision constraints.
+
 ## Playtest issues to keep visible
 
 1. **Redundant-arm apparent freeze**: the earlier 3+ joint controller repeatedly
@@ -78,6 +95,8 @@ the simulator grows. See the root README for build and usage instructions.
 - Preserve the existing two-joint smooth movement and elbow constraints.
 - Reach feasible multi-joint targets after changing from other safe poses.
 - Never accept a path with self-intersection or joint-limit violations.
+- Keep intermediate links outside the target keep-out zone on all sampled
+  path and follower states, and keep internal joints outside tight folds.
 - Respect configured per-joint speed and acceleration bounds while following.
 - Stop and show an explicit failure when planning exhausts its search budget.
 - Re-run all CTest targets and validate the GUI on Windows/Ninja and/or MSVC.

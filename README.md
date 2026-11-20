@@ -8,8 +8,8 @@ A modular C++20 robotic arm simulator featuring custom kinematics, Jacobian-base
 - Fixed-timestep joint simulation using joint velocities.
 - Analytic 2 x N Jacobian, Cartesian end-effector velocity, and 2-joint determinant.
 - Custom damped least-squares inverse kinematics, velocity limiting, and target tolerance.
-- Collision-aware GUI motion: analytic two-link IK with a stable elbow branch, angular speed/acceleration caps, joint clearance, and nonadjacent link collision checks for three or more links.
-- CLI frame telemetry and nine automatic tests using CTest.
+- Collision-aware GUI motion: analytic two-link IK with a stable elbow branch, angular speed/acceleration caps, joint clearance, nonadjacent-link collision checks, and extra target-object/folding safeguards.
+- CLI frame telemetry and ten automatic tests using CTest.
 - Interactive 2D GUI, using raylib **only** for display and input: target selection by mouse, real-time telemetry, pause/reset, grid and zoom.
 - **Configurable robot arm (Phase 1):** edit 2–6 joints, each link's length and initial relative angle, per-joint rotation range, maximum speed, and maximum acceleration in the GUI.
 
@@ -141,3 +141,29 @@ should move bounded planning to a worker thread and support interruption when
 new targets are chosen. More advanced path smoothing/continuous collision
 checking, joint-branch switching, and planning around user-added obstacles
 are still open. See `docs/ROADMAP.md`.
+
+## Playtest safety improvement: target objects and tightly folded arms
+
+The GUI now treats the clicked target as a **physical keep-out area** rather
+than a purely mathematical point. It checks a target radius of 0.16 m
+against all upstream arm links. The last link is allowed into a short
+tool-tip zone of twice that radius so that the end effector can arrive.
+This is an intentionally simplified contact model, not a rigid-body
+simulation with detailed gripper geometry or object collision shapes.
+If the target is already underneath an intermediate link, a new 3+ joint
+plan fails safely instead of trying to push the arm through the object.
+
+The GUI also uses a tighter **fold margin of 0.55 rad** (about 31.5 degrees)
+from the fully folded, overlapping pose. Its joint presets and configurator
+ranges reflect this restriction. Custom configurations that would fold too
+tightly are rejected on Apply. The two-joint controller checks its target
+approach before accepting each simulation step; the multi-joint planner
+checks the entire planned path, plus its actual per-frame movement.
+
+The reusable engine retains its previous opt-in defaults
+(`foldClearance=jointClearance=0.14`, `targetClearance=0`) to avoid
+breaking existing CLI scenarios. Configure the new margins using
+`MotionSettings2D`. A larger clearance reduces the reachable workspace.
+In particular, **NO SAFE PATH FOUND** can mean that a goal is excluded by
+the target/arm safety envelopes, or that the bounded search did not find a
+valid path. The GUI does not yet guarantee a detour for every feasible goal.
