@@ -268,7 +268,7 @@ int extend(std::vector<Node>& tree, const Angles& target, const SearchContext& c
 }
 
 void validate(const SearchContext& c, math::Vec2 target) {
-    if (c.joints.size() < 3 || c.joints.size() != c.limits.size() ||
+    if (c.joints.size() < 2 || c.joints.size() != c.limits.size() ||
         !std::isfinite(target.x) || !std::isfinite(target.y) ||
         !std::isfinite(c.settings.positionTolerance) || c.settings.positionTolerance <= 0.0 ||
         !std::isfinite(c.settings.jointClearance) || c.settings.jointClearance <= 0.0 ||
@@ -279,7 +279,7 @@ void validate(const SearchContext& c, math::Vec2 target) {
         !std::isfinite(c.settings.targetClearance) ||
         c.settings.targetClearance < 0.0 ||
         !std::isfinite(c.settings.linkClearance) || c.settings.linkClearance < 0.0)
-        throw std::invalid_argument("Planning requires >=3 joints, matching limits and finite target");
+        throw std::invalid_argument("Planning requires >=2 joints, matching limits and finite target");
     for (std::size_t i = 0; i < c.joints.size(); ++i) {
         const auto& bound = c.limits[i];
         if (!std::isfinite(c.joints[i].length) || c.joints[i].length <= 0.0 ||
@@ -315,6 +315,59 @@ PlannedJointPath2D planJointPath2D(std::span<const Joint2D> joints,
         target.length() < settings.targetClearance) return output;
 
     std::mt19937 rng{0x526f626fU};
+    if (joints.size() == 2) {
+        // The closed-form IK solution is periodic in the shoulder angle.
+        // A short shoulder rotation may sweep an intermediate link across the
+        // target, while the equivalent angle +/- 2*pi is collision-free.
+        // Preserve the elbow branch (switching branches would require
+        // crossing a forbidden straight/folded configuration).
+        const double l1 = joints[0].length;
+        const double l2 = joints[1].length;
+        const double radius2 = target.x * target.x + target.y * target.y;
+        const double cosine = (radius2 - l1 * l1 - l2 * l2) /
+                              (2.0 * l1 * l2);
+        if (!std::isfinite(cosine) || cosine < -1.0 - 1e-12 ||
+            cosine > 1.0 + 1e-12) return output;
+
+        const double elbow = (std::signbit(start[1]) ? -1.0 : 1.0) *
+                             std::acos(std::clamp(cosine, -1.0, 1.0));
+        const double shoulder = std::atan2(target.y, target.x) -
+                                std::atan2(l2 * std::sin(elbow),
+                                           l1 + l2 * std::cos(elbow));
+        constexpr double fullTurn = 2.0 * pi;
+        const double nearestTurn = std::round((start[0] - shoulder) / fullTurn);
+
+        std::vector<Angles> goals;
+        for (int offset = -3; offset <= 3; ++offset) {
+            const double angle = shoulder + (nearestTurn + offset) * fullTurn;
+            Angles candidate{angle, elbow};
+            if (c.valid(candidate)) goals.push_back(std::move(candidate));
+        }
+        std::sort(goals.begin(), goals.end(),
+                  [&](const Angles& a, const Angles& b) {
+                      return distanceSquared(start, a) <
+                             distanceSquared(start, b);
+                  });
+
+        // Prefer a direct, fully checked transition. This keeps ordinary
+        // two-joint movements as smooth as the previous controller.
+        for (const auto& goal : goals) {
+            if (!c.edge(start, goal)) continue;
+            output.waypoints = {start, goal};
+            output.terminalError = (target - c.positions(goal).back()).length();
+            return output;
+        }
+        // When no direct transition is safe, search joint space for a detour.
+        for (const auto& goal : goals) {
+            const auto path = connectPath(c, start, goal, rng);
+            if (path.empty()) continue;
+            output.waypoints = shorten(c, path);
+            output.terminalError = (target - c.positions(goal).back()).length();
+            return output;
+        }
+        return output;
+    }
+
     // Prioritize the original configuration; use other sampled joint states
     // when the straightforward IK basin or a direct edge is blocked.
     for (int attempt = 0; attempt < 70; ++attempt) {

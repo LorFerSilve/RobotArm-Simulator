@@ -13,6 +13,9 @@ the simulator grows. See the root README for build and usage instructions.
       multi-start IK plus a bounded joint-space path planner. A failed search is
       explicitly reported instead of repeatedly applying an invalid local step.
 - [x] Regression coverage for constrained, collision-free 3-, 4- and 6-joint paths.
+- [x] **Two-joint safe detours:** enumerate periodic closed-form IK solutions,
+      check opposite-direction shoulder rotations, and plan joint-space
+      paths for both two-joint and redundant arms.
 
 ## Outstanding work, in intended order
 
@@ -70,6 +73,14 @@ the simulator grows. See the root README for build and usage instructions.
       feasible detour. Do not solve this by relaxing collision constraints.
 
 ## Playtest issues to keep visible
+
+0a. **Two-joint target blocks shortest shoulder rotation**: a direct
+    move from end-effector `(4,0)` to `(2,3)` with 4 m and 2 m links
+    rotates the first link through the target. The earlier 2-joint controller
+    stopped as `BLOCKED` despite a valid longer route. Now the planner
+    checks equivalent shoulder poses offset by full turns and can choose
+    the opposite rotation direction. This requires compatible shoulder
+    joint limits and remains a bounded, collision-checked search.
 
 0. **Premature failure when an arm could avoid the target:** previously, every
    IK *iteration* was required to stay target-clear, even though these virtual

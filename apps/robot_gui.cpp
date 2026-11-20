@@ -382,16 +382,18 @@ int main() {
         }
 
         if (!paused) {
-            // Fixed-step control; for redundant robots plan only once the
-            // mouse is released so dragging doesn't trigger costly searches.
+            // Plan a safe joint-space route once the target is committed.
+            // Retain immediate analytic motion while dragging a 2-link arm.
             accumulator += std::min(static_cast<double>(GetFrameTime()), 0.1);
             for (int steps = 0; accumulator >= fixedDt && steps < 6; ++steps) {
-                if (joints.size() == 2) {
-                    motionState = advanceTowardTarget(joints, target, fixedDt,
-                                                      motionSettings, robot.limits);
-                } else if (draggingTarget) {
-                    // Wait for a committed target; no outdated plan is executed.
-                    for (auto& joint : joints) joint.angularVelocity = 0.0;
+                if (draggingTarget) {
+                    if (joints.size() == 2) {
+                        motionState = advanceTowardTarget(joints, target, fixedDt,
+                                                          motionSettings, robot.limits);
+                    } else {
+                        // Wait for the committed target; do not follow an old path.
+                        for (auto& joint : joints) joint.angularVelocity = 0.0;
+                    }
                 } else {
                     if (pendingPlan) {
                         plannedMotion.setTarget(joints, robot.limits, target, motionSettings);
@@ -409,8 +411,8 @@ int main() {
         const auto jacobian = endEffectorJacobian(positions);
         const auto velocity = endEffectorVelocity(jacobian, joints);
         const double error = (target - positions.back()).length();
-        const bool reached = joints.size() == 2 ? error <= 0.005 :
-            (!draggingTarget && motionState.reached && error <= motionSettings.positionTolerance);
+        const bool reached = !draggingTarget && motionState.reached &&
+                             error <= motionSettings.positionTolerance;
         const bool stalled = !reached && motionState.blocked;
         const double radius = target.length();
         bool unreachable = radius > reach;
@@ -430,9 +432,9 @@ int main() {
         drawGrid(viewport, canvasWidth, height);
         BeginScissorMode(0, headerHeight, canvasWidth, height - headerHeight);
         drawArm(viewport, positions, target,
-                !unreachable && !(joints.size() > 2 && !draggingTarget && plannedMotion.searchFailed()));
+                !unreachable && !(!draggingTarget && plannedMotion.searchFailed()));
         EndScissorMode();
-        DrawText("CLICK/DRAG Target (release to plan 3+)   SPACE Pause   R Reset   WHEEL Zoom",
+        DrawText("CLICK/DRAG Target (release to plan 2+)   SPACE Pause   R Reset   WHEEL Zoom",
                  20, height - 28, 15, muted);
         DrawRectangle(0, 0, width, headerHeight, background);
         DrawText("ROBOTARM", 23, 16, 25, light);
@@ -473,7 +475,7 @@ int main() {
             drawSidebar(width, height, joints, target, positions.back(), velocity,
                         error, simulatedTime, paused, reached, stalled,
                         motionState.constrained, unreachable,
-                        joints.size() > 2 && !draggingTarget && plannedMotion.searchFailed());
+                        !draggingTarget && plannedMotion.searchFailed());
         }
         EndDrawing();
     }

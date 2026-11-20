@@ -9,7 +9,7 @@ A modular C++20 robotic arm simulator featuring custom kinematics, Jacobian-base
 - Analytic 2 x N Jacobian, Cartesian end-effector velocity, and 2-joint determinant.
 - Custom damped least-squares inverse kinematics, velocity limiting, and target tolerance.
 - Collision-aware GUI motion: analytic two-link IK with a stable elbow branch, angular speed/acceleration caps, joint clearance, nonadjacent-link collision checks, and extra target-object/folding safeguards.
-- CLI frame telemetry and eleven automatic tests using CTest.
+- CLI frame telemetry and twelve automatic tests using CTest.
 - Interactive 2D GUI, using raylib **only** for display and input: target selection by mouse, real-time telemetry, pause/reset, grid and zoom.
 - **Configurable robot arm (Phase 1):** edit 2–6 joints, each link's length and initial relative angle, per-joint rotation range, maximum speed, and maximum acceleration in the GUI.
 
@@ -44,13 +44,13 @@ ctest --test-dir build -C Debug --output-on-failure
 .\build\Debug\robot_gui.exe
 ```
 
-The GUI uses 60 Hz fixed-step simulation and a 60 FPS rendering target. Rendering and simulation advance separately. Two joints use closed-form IK and an acceleration-limited joint-space servo to maintain the original elbow configuration. Three to six joints now use a bounded, goal-aware configuration-space path planner instead of repeatedly applying a local DLS velocity command. The path planner uses multi-start constrained IK to find a safe goal configuration, then direct joint interpolation or a bidirectional RRT-Connect search, followed by an acceleration-limited joint-space follower.
+The GUI uses 60 Hz fixed-step simulation and a 60 FPS rendering target. Rendering and simulation advance separately. Two joints now use closed-form IK **with equivalent full-turn shoulder configurations** and collision-checked joint-space paths; a smooth, acceleration-limited servo follows the chosen route. Three to six joints use a bounded, goal-aware configuration-space path planner instead of repeatedly applying a local DLS velocity command. The path planner uses multi-start constrained IK to find a safe goal configuration, then direct joint interpolation or a bidirectional RRT-Connect search, followed by an acceleration-limited joint-space follower.
 
 ### GUI controls
 
 | Input | Function |
 | --- | --- |
-| Left click/drag within the canvas | Set the end-effector target (metres); 3+ joint motion is planned on mouse release |
+| Left click/drag within the canvas | Set the end-effector target (metres); safe joint-space motion is planned on mouse release for all arms |
 | `Space` | Pause/resume |
 | `R` | Reset to initial pose and target |
 | `2` | Two-joint robot preset |
@@ -194,3 +194,24 @@ The new regression tests cover both a collision-prone straight-line route
 and the safe retreat from a target initially under arm segments. As before,
 a bounded RRT search can still fail to find some feasible paths, so
 `NO SAFE PATH FOUND` never proves that the position is impossible.
+
+## Two-joint detours (playtest regression)
+
+A two-joint arm may reach a Cartesian target safely even when the **shortest
+shoulder rotation** would sweep the first link through that target. The
+two-joint planner now enumerates equivalent analytical IK poses whose
+shoulder angles differ by whole turns (`2*pi`), retaining the configured
+elbow branch and individual joint limits. It checks direct joint-space
+transitions first, then tries the existing RRT-Connect fallback if necessary.
+
+For example, from an arm with 4 m and 2 m links at end-effector position
+`(4, 0)`, the target `(2, 3)` lies in the swept area of the short shoulder
+rotation. With a shoulder range of `[-2*pi, 2*pi]`, moving around in the
+opposite direction can instead reach the target safely. This case is
+verified in `test_two_joint_detour.cpp`, including the executed motion,
+target clearance, speed and acceleration limits.
+
+A route involving an extra revolution is only accepted if the configured
+shoulder rotation range actually permits it. The planner does not silently
+cross joint limits, reverse the elbow branch, or relax target collision
+constraints. Target planning runs when the mouse button is released.
