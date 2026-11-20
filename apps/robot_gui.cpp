@@ -434,7 +434,8 @@ void drawSidebar(int screenWidth, int height, const std::vector<Joint2D>& joints
                  Vec2 target, Vec2 endEffector, Vec2 tipVelocity,
                  double error, double elapsed, bool paused,
                  bool reached, bool stalled, bool constrained, bool unreachable,
-                 bool noPath, bool planning, const char* failureReason) {
+                 bool noPath, bool planning, const char* failureReason,
+                 double routeDistance, double straightDistance) {
     const int x = screenWidth - sidebarWidth;
     DrawRectangle(x, headerHeight + 64, sidebarWidth, height - headerHeight - 64, sidebarColor);
     DrawLine(x, headerHeight, x, height, gridColor);
@@ -455,7 +456,14 @@ void drawSidebar(int screenWidth, int height, const std::vector<Joint2D>& joints
         y += 25;
     }
     DrawText(TextFormat("Time: %.2f s", elapsed), left, y, 16, muted);
-    y += 34;
+    y += 26;
+    if (routeDistance > 0.0) {
+        DrawText(TextFormat("Tip travel: %.2f m (direct %.2f m)",
+                            routeDistance, straightDistance), left, y, 14, blue);
+        y += 26;
+    } else {
+        y += 8;
+    }
     DrawLine(x + 20, y, screenWidth - 20, y, gridColor);
     y += 20;
 
@@ -813,7 +821,10 @@ int main() {
                         planning,
                         !planningError.empty() ? planningError.c_str() :
                         robotics::kinematics::planningFailureMessage(
-                            plannedMotion.failureReason()));
+                            plannedMotion.failureReason()),
+                        plannedMotion.endEffectorDistance(),
+                        plannedMotion.endEffectorTrace().empty() ? 0.0 :
+                            (target - plannedMotion.endEffectorTrace().front()).length());
         }
         EndDrawing();
     }

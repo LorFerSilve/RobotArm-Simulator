@@ -230,6 +230,87 @@ double distanceSquared(const Angles& a, const Angles& b) {
     return (target - c.positions(q).back()).length() <= c.settings.positionTolerance;
 }
 
+// Prefer a Cartesian straight-line motion whenever its inverse-kinematics
+// lift is feasible. The tool is sampled along the straight line, while each
+// connecting joint-space edge is checked using the existing full safety
+// constraints. This is a candidate, never a shortcut around collision checks.
+[[nodiscard]] std::vector<Angles> cartesianGuidedPath(
+    const SearchContext& c, const Angles& start, math::Vec2 target) {
+    const auto origin = c.positions(start).back();
+    const double distance = (target - origin).length();
+    if (distance <= c.settings.positionTolerance) return {start};
+    const int count = std::clamp(static_cast<int>(std::ceil(distance / 0.18)),
+                                 6, 28);
+    std::vector<Angles> path{start};
+    path.reserve(static_cast<std::size_t>(count + 1));
+    Angles current = start;
+
+    for (int step = 1; step <= count; ++step) {
+        if (c.cancelled()) return {};
+        const auto nextTarget = origin + (target - origin) *
+            (static_cast<double>(step) / count);
+        Angles next;
+        if (c.joints.size() == 2) {
+            const double l1 = c.joints[0].length;
+            const double l2 = c.joints[1].length;
+            const double cosine = (nextTarget.dot(nextTarget) - l1*l1 - l2*l2) /
+                                  (2.0*l1*l2);
+            if (cosine < -1.0 - 1e-10 || cosine > 1.0 + 1e-10)
+                return {};
+            const double elbow = (std::signbit(start[1]) ? -1.0 : 1.0) *
+                std::acos(std::clamp(cosine, -1.0, 1.0));
+            const double shoulder = std::atan2(nextTarget.y, nextTarget.x) -
+                std::atan2(l2 * std::sin(elbow), l1 + l2 * std::cos(elbow));
+            double best = std::numeric_limits<double>::infinity();
+            for (int winding = -4; winding <= 4; ++winding) {
+                Angles candidate{shoulder + (2.0*pi)*winding, elbow};
+                if (!c.validRobot(candidate) || !c.edge(current, candidate))
+                    continue;
+                const double motion = distanceSquared(current, candidate);
+                if (motion < best) {
+                    best = motion;
+                    next = std::move(candidate);
+                }
+            }
+            if (next.empty()) return {};
+        } else {
+            next = current;
+            if (!refineIK(c, next, nextTarget) ||
+                !c.validRobot(next) || !c.edge(current, next))
+                return {};
+        }
+        if ((c.positions(next).back() - nextTarget).length() >
+            c.settings.positionTolerance) return {};
+        path.push_back(next);
+        current = std::move(next);
+    }
+    if (!c.valid(path.back())) return {};
+    return path;
+}
+
+// A target inside the first link's turning radius is a topological barrier:
+// the shoulder cannot rotate past the target without striking it, regardless
+// of what the elbow does. Only report this cause if *every* permitted IK
+// shoulder winding necessarily crosses the target direction.
+[[nodiscard]] bool shoulderRouteBlocked(
+    const SearchContext& c, const Angles& start, const std::vector<Angles>& goals) {
+    if (goals.empty() || c.settings.targetClearance <= 0.0 ||
+        !c.valid(start)) return false;
+    const double r = c.target.length();
+    if (r <= c.settings.targetClearance ||
+        r >= c.joints[0].length - c.settings.targetClearance)
+        return false;
+    const double theta = std::atan2(c.target.y, c.target.x);
+    for (const auto& goal : goals) {
+        const double lower = std::min(start[0], goal[0]);
+        const double upper = std::max(start[0], goal[0]);
+        const double first = std::ceil((lower - theta) / (2.0*pi));
+        const double last = std::floor((upper - theta) / (2.0*pi));
+        if (first > last) return false; // this goal has an unblocked winding
+    }
+    return true;
+}
+
 struct Node {
     Angles q;
     int parent;
@@ -541,6 +622,9 @@ int extend(std::vector<Node>& tree, const Angles& target, const SearchContext& c
             plan.endEffectorTrace.push_back(forwardKinematics(robot).back());
         }
     }
+    for (std::size_t i = 1; i < plan.endEffectorTrace.size(); ++i)
+        plan.endEffectorDistance +=
+            (plan.endEffectorTrace[i] - plan.endEffectorTrace[i - 1]).length();
     return plan;
 }
 
@@ -632,6 +716,13 @@ PlannedJointPath2D planJointPath2D(std::span<const Joint2D> joints,
 
         const double elbow = (std::signbit(start[1]) ? -1.0 : 1.0) *
                              std::acos(std::clamp(cosine, -1.0, 1.0));
+        if (elbow < limits[1].minAngle - 1e-9 ||
+            elbow > limits[1].maxAngle + 1e-9 ||
+            std::abs(elbow) < settings.jointClearance - 1e-9 ||
+            std::abs(elbow) > pi - settings.foldClearance + 1e-9) {
+            output.failure = PlanningFailure2D::OutOfReach;
+            return output;
+        }
         const double shoulder = std::atan2(target.y, target.x) -
                                 std::atan2(l2 * std::sin(elbow),
                                            l1 + l2 * std::cos(elbow));
@@ -650,26 +741,56 @@ PlannedJointPath2D planJointPath2D(std::span<const Joint2D> joints,
                              distanceSquared(start, b);
                   });
 
-        // Prefer a direct, fully checked transition. This keeps ordinary
-        // two-joint movements as smooth as the previous controller.
+        // Use Cartesian tip travel rather than the smallest joint-angle
+        // change as the selection cost. A safe near-straight IK lift takes
+        // priority over the broad arc of one joint-space interpolation.
+        PlannedJointPath2D best;
+        double bestDistance = std::numeric_limits<double>::infinity();
+        const auto consider = [&](std::vector<Angles> path) {
+            if (path.empty() || c.cancelled()) return;
+            PlannedJointPath2D candidate;
+            candidate.waypoints = std::move(path);
+            candidate.terminalError =
+                (target - c.positions(candidate.waypoints.back()).back()).length();
+            candidate = withEndEffectorTrace(
+                c, prepareTrajectory(c, std::move(candidate)));
+            if (candidate.found() &&
+                candidate.endEffectorDistance < bestDistance) {
+                bestDistance = candidate.endEffectorDistance;
+                best = std::move(candidate);
+            }
+        };
+        consider(cartesianGuidedPath(c, start, target));
         for (const auto& goal : goals) {
-            if (!c.edge(start, goal)) continue;
-            output.waypoints = {start, goal};
-            output.terminalError = (target - c.positions(goal).back()).length();
-            return withEndEffectorTrace(c, prepareTrajectory(c, std::move(output)));
+            if (c.cancelled()) break;
+            if (c.edge(start, goal)) consider({start, goal});
         }
-        // When no direct transition is safe, search joint space for a detour.
+        if (best.found()) return best;
+
+        // Only call RRT if direct and straight-Cartesian candidates failed.
         for (const auto& goal : goals) {
-            const auto path = connectPath(c, start, goal, rng);
-            if (path.empty()) continue;
-            output.waypoints = shorten(c, path);
-            output.terminalError = (target - c.positions(goal).back()).length();
-            return withEndEffectorTrace(c, prepareTrajectory(c, std::move(output)));
+            if (c.cancelled()) break;
+            auto path = connectPath(c, start, goal, rng);
+            if (!path.empty()) consider(shorten(c, path));
         }
+        if (best.found()) return best;
         output.failure = c.cancelled() ? PlanningFailure2D::Cancelled :
                          goals.empty() ? PlanningFailure2D::NoIKSolution :
-                                         PlanningFailure2D::PathSearchExhausted;
+                         shoulderRouteBlocked(c, start, goals) ?
+                             PlanningFailure2D::TargetBlockedByJointLimits :
+                             PlanningFailure2D::PathSearchExhausted;
         return output;
+    }
+
+    // Try a collision-checked Cartesian lift first. It tends to make the
+    // tool travel nearly straight and avoids unnecessary RRT detours. If any
+    // intermediate IK state or motion edge is unsafe, retain the existing
+    // multi-start IK/RRT behavior as a robust fallback.
+    auto guided = cartesianGuidedPath(c, start, target);
+    if (!guided.empty() && !c.cancelled()) {
+        output.waypoints = std::move(guided);
+        output.terminalError = (target - c.positions(output.waypoints.back()).back()).length();
+        return withEndEffectorTrace(c, prepareTrajectory(c, std::move(output)));
     }
 
     // Prioritize the original configuration; use other sampled joint states
@@ -713,6 +834,7 @@ const char* planningFailureMessage(PlanningFailure2D reason) noexcept {
     case PlanningFailure2D::GoalInObstacle: return "TARGET BLOCKED";
     case PlanningFailure2D::NoIKSolution: return "NO VALID IK SOLUTION";
     case PlanningFailure2D::PathSearchExhausted: return "SEARCH BUDGET EXHAUSTED";
+    case PlanningFailure2D::TargetBlockedByJointLimits: return "TARGET BLOCKS SHOULDER ROTATION";
     }
     return "UNKNOWN PLANNING STATUS";
 }
@@ -720,6 +842,7 @@ const char* planningFailureMessage(PlanningFailure2D reason) noexcept {
 void PlannedMotion2D::reset() noexcept {
     path_.clear();
     endEffectorTrace_.clear();
+    endEffectorDistance_ = 0.0;
     index_ = 0;
     segmentElapsed_ = 0.0;
     segmentDuration_ = 0.0;
@@ -739,6 +862,7 @@ void PlannedMotion2D::usePlan(PlannedJointPath2D plan, math::Vec2 target) {
     failure_ = plan.failure;
     path_ = std::move(plan.waypoints);
     endEffectorTrace_ = std::move(plan.endEffectorTrace);
+    endEffectorDistance_ = plan.endEffectorDistance;
     splineTangents_ = std::move(plan.splineTangents);
     pathDistances_ = std::move(plan.pathDistances);
     trajectoryDuration_ = plan.trajectoryDuration;

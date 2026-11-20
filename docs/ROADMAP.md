@@ -43,8 +43,15 @@ completeness and real-time replanning are not yet guaranteed.
       budget, target inside an obstacle, cancellation, or out-of-reach goal.
 - [x] Permit virtual numerical IK iterations through scene obstacles
       while validating final IK poses and all physical trajectories.
-- [ ] Improve search coverage for difficult constrained workspaces (adaptive
-      budget and goal sampling) without weakening collision checks.
+- [x] Try straight Cartesian IK waypoint lifts for tip-distance-efficient
+      motion; compare valid two-joint candidates by sampled end-effector
+      travel distance, with safe IK/RRT fallback.
+- [x] Identify two-joint target/shoulder winding barriers and elbow-imposed
+      inner workspace limitations without falsely blaming the search budget.
+- [ ] Add adaptive RRT budgets and objective-aware multi-start search for
+      constrained environments where Cartesian lifting fails.
+- [ ] Optimize Cartesian travel more globally through obstacles (the new
+      safe straight-line preference is a heuristic, not a global optimum).
 - [x] Run planning on a C++20 worker; cancel superseded jobs when targets,
       robot geometry, or obstacles change. Prevent stale results from applying.
 - [x] Prepare C2 quintic Hermite trajectories with a shared time clock;

@@ -131,3 +131,8 @@ add_test(NAME SmoothTrajectory2D COMMAND test_smooth_trajectory)
 add_executable(test_trajectory_preview tests/test_trajectory_preview.cpp)
 target_link_libraries(test_trajectory_preview PRIVATE robotics_core)
 add_test(NAME TrajectoryPreview2D COMMAND test_trajectory_preview)
+
+# Cartesian-distance guided path optimization and joint-limit barrier diagnosis.
+add_executable(test_cartesian_optimization tests/test_cartesian_optimization.cpp)
+target_link_libraries(test_cartesian_optimization PRIVATE robotics_core)
+add_test(NAME CartesianTipOptimization COMMAND test_cartesian_optimization)

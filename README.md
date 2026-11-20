@@ -411,3 +411,40 @@ the current tool position, ends at the planned target, depicts a nontrivial
 two-joint detour, follows the executed end-effector motion, and clears on
 reset or an unsuccessful plan. Existing release-matrix, obstacle and
 asynchronous-planning tests remain enabled.
+
+## Cartesian-efficient tip paths and honest unreachable diagnostics
+
+The planner first attempts to **lift a nearly straight Cartesian
+end-effector route to joint space** by solving a sequence of intermediate
+IK targets. Every intermediate robot state and every connecting
+joint-space motion is subjected to the same joint-limit, self-collision,
+target-contact, and scene-obstacle checks as before. If the lift fails,
+the existing collision-checked IK/RRT planner is used as fallback.
+For two-joint arms it compares valid straight-guided and direct paths
+using **the actual sampled distance travelled by the end effector**,
+rather than choosing whichever configuration changes the joints least.
+This is an optimization heuristic, not a global shortest-path proof.
+
+The telemetry panel shows the planned tip travel in metres alongside the
+Euclidean direct distance (a lower bound). The preview line remains
+derived from the exact motion geometry used by the follower.
+
+A two-joint target can be reachable in forward/inverse kinematics yet
+inaccessible by a safe continuous motion with the currently configured
+joint ranges. The planner now diagnoses an important instance:
+`TARGET BLOCKS SHOULDER ROTATION`. If the target lies inside the first
+link's turning radius, every permitted shoulder winding may sweep that
+link through the target safety zone. The screenshot regression with
+two 1 m links, initial shoulder -164.85°, elbow -93.18°, and target
+`(-0.36,-0.80)` is such an example. The negative-elbow IK solution
+at shoulder -50.24° is geometrically valid but the short shoulder route
+would strike the target. An opposite-direction solution at roughly
+-410.24° exceeds the configured -360° shoulder limit. These limits
+are **never** expanded silently; change them only if the actual robot
+hardware is designed to permit further rotation. A bounded RRT failure
+for other scenes still does not prove that a route is impossible.
+
+The `CartesianTipOptimization` regression compares tip travel against
+the original direct joint interpolation, verifies a near-straight
+collision-free motion, and checks correct diagnostics for the reported
+shoulder-barrier scenario and an unreachable inner workspace.

@@ -16,7 +16,8 @@ enum class PlanningFailure2D {
     OutOfReach,
     GoalInObstacle,
     NoIKSolution,
-    PathSearchExhausted
+    PathSearchExhausted,
+    TargetBlockedByJointLimits
 };
 
 [[nodiscard]] const char* planningFailureMessage(PlanningFailure2D reason) noexcept;
@@ -26,6 +27,9 @@ struct PlannedJointPath2D {
     // Empty if a collision-free solution was not found within the search budget.
     std::vector<std::vector<double>> waypoints;
     double terminalError{};
+    // Total Cartesian distance travelled by the end effector along this plan.
+    // Computed from the same sampled trace shown by the GUI.
+    double endEffectorDistance{};
     // Pre-validated C2 spline geometry, generated in the planning worker.
     // Empty for already-reached targets, otherwise size matches waypoints.
     std::vector<std::vector<double>> splineTangents;
@@ -69,6 +73,9 @@ public:
                                           std::span<const geometry::Obstacle2D> obstacles = {});
     [[nodiscard]] bool pathAvailable() const noexcept { return !path_.empty(); }
     // Read-only drawing data; reset/new plan clears or replaces it.
+    [[nodiscard]] double endEffectorDistance() const noexcept {
+        return endEffectorDistance_;
+    }
     [[nodiscard]] std::span<const math::Vec2> endEffectorTrace() const noexcept {
         return endEffectorTrace_;
     }
@@ -80,6 +87,7 @@ public:
 private:
     std::vector<std::vector<double>> path_;
     std::vector<math::Vec2> endEffectorTrace_;
+    double endEffectorDistance_{};
     std::size_t index_{};
     double segmentElapsed_{};
     double segmentDuration_{};
