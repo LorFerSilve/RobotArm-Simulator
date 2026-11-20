@@ -25,13 +25,17 @@ struct SearchContext {
     const MotionSettings2D& settings;
     math::Vec2 target;
     std::span<const geometry::Obstacle2D> obstacles;
+    std::stop_token cancellation;
+
+    [[nodiscard]] bool cancelled() const noexcept { return cancellation.stop_requested(); }
 
     explicit SearchContext(std::span<const Joint2D> state,
                            std::span<const JointLimits2D> bounds,
                            const MotionSettings2D& s, math::Vec2 goal,
-                           std::span<const geometry::Obstacle2D> scene)
+                           std::span<const geometry::Obstacle2D> scene,
+                           std::stop_token stop = {})
         : joints(state.begin(), state.end()), limits(bounds.begin(), bounds.end()),
-          settings(s), target(goal), obstacles(scene) {}
+          settings(s), target(goal), obstacles(scene), cancellation(stop) {}
 
     [[nodiscard]] Angles angles() const {
         Angles q;
@@ -47,7 +51,7 @@ struct SearchContext {
     }
 
     [[nodiscard]] bool validRobot(const Angles& q) const {
-        if (q.size() != joints.size()) return false;
+        if (cancelled() || q.size() != joints.size()) return false;
         for (std::size_t i = 0; i < q.size(); ++i) {
             if (!std::isfinite(q[i]) || q[i] < limits[i].minAngle ||
                 q[i] > limits[i].maxAngle) return false;
@@ -81,6 +85,7 @@ struct SearchContext {
         const auto steps = std::max(1, static_cast<int>(std::ceil(maxDelta / edgeResolution)));
         Angles q(a.size());
         for (int step = 1; step <= steps; ++step) {
+            if (cancelled()) return false;
             const double alpha = static_cast<double>(step) / steps;
             for (std::size_t i = 0; i < q.size(); ++i)
                 q[i] = a[i] + alpha * (b[i] - a[i]);
@@ -121,6 +126,7 @@ struct SearchContext {
         Angles q(a.size());
 
         for (int step = 1; step <= steps; ++step) {
+            if (cancelled()) return false;
             const double alpha = static_cast<double>(step) / steps;
             for (std::size_t i = 0; i < q.size(); ++i)
                 to[i] = a[i] + alpha * (b[i] - a[i]);
@@ -159,6 +165,7 @@ struct SearchContext {
                     static_cast<int>(std::ceil(maximumTravel / 0.04))));
             }
             for (int sub = 1; sub <= checks; ++sub) {
+                if (cancelled()) return false;
                 const double fraction = static_cast<double>(sub) / checks;
                 for (std::size_t i = 0; i < q.size(); ++i)
                     q[i] = from[i] + fraction * (to[i] - from[i]);
@@ -187,6 +194,7 @@ double distanceSquared(const Angles& a, const Angles& b) {
 // Random restarts can find alternative redundant configurations.
 [[nodiscard]] bool refineIK(const SearchContext& c, Angles& q, math::Vec2 target) {
     for (int step = 0; step < 180; ++step) {
+        if (c.cancelled()) return false;
         const auto positions = c.positions(q);
         const auto e = target - positions.back();
         const double error = e.length();
@@ -286,6 +294,7 @@ int extend(std::vector<Node>& tree, const Angles& target, const SearchContext& c
     std::vector<Node> fromStart{{start, -1}};
     std::vector<Node> fromGoal{{goal, -1}};
     for (int iter = 0; iter < 1800; ++iter) {
+        if (c.cancelled()) return {};
         const bool forward = iter % 2 == 0;
         auto& growing = forward ? fromStart : fromGoal;
         auto& matching = forward ? fromGoal : fromStart;
@@ -301,6 +310,7 @@ int extend(std::vector<Node>& tree, const Angles& target, const SearchContext& c
         const auto& destination = growing[static_cast<std::size_t>(grown)].q;
         int matchIndex = -1;
         for (int k = 0; k < 80; ++k) {
+            if (c.cancelled()) return {};
             const int newer = extend(matching, destination, c);
             if (newer < 0) break;
             matchIndex = newer;
@@ -323,6 +333,7 @@ int extend(std::vector<Node>& tree, const Angles& target, const SearchContext& c
     std::vector<Angles> simplified{path.front()};
     std::size_t i = 0;
     while (i + 1 < path.size()) {
+        if (c.cancelled()) return {};
         std::size_t next = path.size() - 1;
         while (next > i + 1 && !c.edge(path[i], path[next])) --next;
         simplified.push_back(path[next]);
@@ -362,11 +373,13 @@ PlannedJointPath2D planJointPath2D(std::span<const Joint2D> joints,
                                    std::span<const JointLimits2D> limits,
                                    math::Vec2 target,
                                    const MotionSettings2D& settings,
-                                   std::span<const geometry::Obstacle2D> obstacles) {
-    SearchContext c(joints, limits, settings, target, obstacles);
+                                   std::span<const geometry::Obstacle2D> obstacles,
+                                   std::stop_token cancellation) {
+    SearchContext c(joints, limits, settings, target, obstacles, cancellation);
+    PlannedJointPath2D output;
+    if (c.cancelled()) { output.failure = PlanningFailure2D::Cancelled; return output; }
     validate(c, target);
     const Angles start = c.angles();
-    PlannedJointPath2D output;
     // An already contacted target needs an escape path, not an immediate failure.
     output.terminalError = (target - c.positions(start).back()).length();
     if (output.terminalError <= settings.positionTolerance && c.valid(start)) {
@@ -375,17 +388,25 @@ PlannedJointPath2D planJointPath2D(std::span<const Joint2D> joints,
     }
     double reach = 0.0;
     for (const auto& joint : joints) reach += joint.length;
-    if (target.length() > reach + settings.positionTolerance) return output;
+    if (target.length() > reach + settings.positionTolerance) {
+        output.failure = PlanningFailure2D::OutOfReach;
+        return output;
+    }
     // A tool endpoint inside a solid obstacle cannot be a valid goal.
     for (const auto& obstacle : obstacles) {
         if (geometry::pointHitsObstacle(target, obstacle,
-                                        settings.obstacleClearance))
+                                        settings.obstacleClearance)) {
+            output.failure = PlanningFailure2D::GoalInObstacle;
             return output;
+        }
     }
     // The base is fixed at the origin; a target containing the base can
     // never be cleared by the first link, regardless of reconfiguration.
     if (settings.targetClearance > 0.0 &&
-        target.length() < settings.targetClearance) return output;
+        target.length() < settings.targetClearance) {
+        output.failure = PlanningFailure2D::GoalInObstacle;
+        return output;
+    }
 
     std::mt19937 rng{0x526f626fU};
     if (joints.size() == 2) {
@@ -400,7 +421,10 @@ PlannedJointPath2D planJointPath2D(std::span<const Joint2D> joints,
         const double cosine = (radius2 - l1 * l1 - l2 * l2) /
                               (2.0 * l1 * l2);
         if (!std::isfinite(cosine) || cosine < -1.0 - 1e-12 ||
-            cosine > 1.0 + 1e-12) return output;
+            cosine > 1.0 + 1e-12) {
+            output.failure = PlanningFailure2D::OutOfReach;
+            return output;
+        }
 
         const double elbow = (std::signbit(start[1]) ? -1.0 : 1.0) *
                              std::acos(std::clamp(cosine, -1.0, 1.0));
@@ -438,12 +462,20 @@ PlannedJointPath2D planJointPath2D(std::span<const Joint2D> joints,
             output.terminalError = (target - c.positions(goal).back()).length();
             return output;
         }
+        output.failure = c.cancelled() ? PlanningFailure2D::Cancelled :
+                         goals.empty() ? PlanningFailure2D::NoIKSolution :
+                                         PlanningFailure2D::PathSearchExhausted;
         return output;
     }
 
     // Prioritize the original configuration; use other sampled joint states
     // when the straightforward IK basin or a direct edge is blocked.
+    bool foundGoal = false;
     for (int attempt = 0; attempt < 70; ++attempt) {
+        if (c.cancelled()) {
+            output.failure = PlanningFailure2D::Cancelled;
+            return output;
+        }
         Angles seed = start;
         if (attempt != 0) {
             for (std::size_t i = 0; i < seed.size(); ++i) {
@@ -456,13 +488,29 @@ PlannedJointPath2D planJointPath2D(std::span<const Joint2D> joints,
             }
         }
         if (!c.validRobot(seed) || !refineIK(c, seed, target)) continue;
+        foundGoal = true;
         const auto path = connectPath(c, start, seed, rng);
         if (path.empty()) continue;
         output.waypoints = shorten(c, path);
         output.terminalError = (target - c.positions(seed).back()).length();
         return output;
     }
+    output.failure = c.cancelled() ? PlanningFailure2D::Cancelled :
+                     foundGoal ? PlanningFailure2D::PathSearchExhausted :
+                                 PlanningFailure2D::NoIKSolution;
     return output;
+}
+
+const char* planningFailureMessage(PlanningFailure2D reason) noexcept {
+    switch (reason) {
+    case PlanningFailure2D::None: return "READY";
+    case PlanningFailure2D::Cancelled: return "PLANNING CANCELLED";
+    case PlanningFailure2D::OutOfReach: return "OUT OF REACH";
+    case PlanningFailure2D::GoalInObstacle: return "TARGET BLOCKED";
+    case PlanningFailure2D::NoIKSolution: return "NO VALID IK SOLUTION";
+    case PlanningFailure2D::PathSearchExhausted: return "SEARCH BUDGET EXHAUSTED";
+    }
+    return "UNKNOWN PLANNING STATUS";
 }
 
 void PlannedMotion2D::reset() noexcept {
@@ -472,20 +520,25 @@ void PlannedMotion2D::reset() noexcept {
     segmentDuration_ = 0.0;
     hasTarget_ = false;
     failed_ = false;
+    failure_ = PlanningFailure2D::None;
+}
+
+void PlannedMotion2D::usePlan(PlannedJointPath2D plan, math::Vec2 target) {
+    target_ = target;
+    hasTarget_ = true;
+    failed_ = !plan.found();
+    failure_ = plan.failure;
+    path_ = std::move(plan.waypoints);
+    index_ = path_.size() > 1 ? 1 : 0;
+    segmentElapsed_ = 0.0;
+    segmentDuration_ = 0.0;
 }
 
 void PlannedMotion2D::setTarget(std::span<const Joint2D> joints,
                                 std::span<const JointLimits2D> limits,
                                 math::Vec2 target, const MotionSettings2D& settings,
                                 std::span<const geometry::Obstacle2D> obstacles) {
-    const auto plan = planJointPath2D(joints, limits, target, settings, obstacles);
-    target_ = target;
-    hasTarget_ = true;
-    failed_ = !plan.found();
-    path_ = plan.waypoints;
-    index_ = path_.size() > 1 ? 1 : 0;
-    segmentElapsed_ = 0.0;
-    segmentDuration_ = 0.0;
+    usePlan(planJointPath2D(joints, limits, target, settings, obstacles), target);
 }
 
 MotionStatus2D PlannedMotion2D::advance(std::span<Joint2D> joints,

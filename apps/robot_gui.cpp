@@ -1,6 +1,7 @@
 #include "robotics/kinematics/ForwardKinematics.hpp"
 #include "robotics/kinematics/SmoothMotion2D.hpp"
 #include "robotics/kinematics/PathPlanning2D.hpp"
+#include "robotics/kinematics/AsyncPlanner2D.hpp"
 #include "robotics/kinematics/RobotConfiguration2D.hpp"
 #include "robotics/kinematics/Jacobian2D.hpp"
 #include "robotics/geometry/Obstacles2D.hpp"
@@ -413,7 +414,7 @@ void drawSidebar(int screenWidth, int height, const std::vector<Joint2D>& joints
                  Vec2 target, Vec2 endEffector, Vec2 tipVelocity,
                  double error, double elapsed, bool paused,
                  bool reached, bool stalled, bool constrained, bool unreachable,
-                 bool noPath) {
+                 bool noPath, bool planning, const char* failureReason) {
     const int x = screenWidth - sidebarWidth;
     DrawRectangle(x, headerHeight + 64, sidebarWidth, height - headerHeight - 64, sidebarColor);
     DrawLine(x, headerHeight, x, height, gridColor);
@@ -422,13 +423,17 @@ void drawSidebar(int screenWidth, int height, const std::vector<Joint2D>& joints
     DrawText("SIMULATION", left, y, 19, light);
     y += 36;
 
-    const char* status = paused ? "PAUSED" : reached ? "TARGET REACHED" :
+    const char* status = planning ? "PLANNING..." : paused ? "PAUSED" : reached ? "TARGET REACHED" :
         noPath ? "NO SAFE PATH FOUND" : unreachable ? "UNREACHABLE" :
         stalled ? "BLOCKED" : constrained ? "AVOIDING CONTACT" : "MOVING";
-    const Color statusColor = paused ? orange : reached ? green :
+    const Color statusColor = planning ? blue : paused ? orange : reached ? green :
         (stalled || unreachable || noPath) ? red : constrained ? orange : blue;
     DrawText(status, left, y, 16, statusColor);
     y += 33;
+    if (noPath && !planning) {
+        DrawText(failureReason, left, y, 13, red);
+        y += 25;
+    }
     DrawText(TextFormat("Time: %.2f s", elapsed), left, y, 16, muted);
     y += 34;
     DrawLine(x + 20, y, screenWidth - 20, y, gridColor);
@@ -470,6 +475,7 @@ int main() {
     using robotics::kinematics::advanceTowardTarget;
     using robotics::kinematics::MotionStatus2D;
     using robotics::kinematics::PlannedMotion2D;
+    using robotics::kinematics::AsyncPlanner2D;
     using robotics::kinematics::MotionSettings2D;
     using robotics::kinematics::forwardKinematics;
     using robotics::kinematics::endEffectorJacobian;
@@ -506,6 +512,8 @@ int main() {
     float zoom = 1.0F;
     MotionStatus2D motionState{};
     PlannedMotion2D plannedMotion;
+    AsyncPlanner2D asyncPlanner;
+    std::string planningError;
     bool pendingPlan = true;
     bool draggingTarget = false;
 
@@ -514,8 +522,10 @@ int main() {
         // Safely stop before following an obsolete collision model.
         paused = true;
         accumulator = 0.0;
+        asyncPlanner.cancel();
         plannedMotion.reset();
         pendingPlan = true;
+        planningError.clear();
         motionState = {};
         for (auto& joint : joints) joint.angularVelocity = 0.0;
     };
@@ -558,8 +568,10 @@ int main() {
                 accumulator = 0.0;
                 paused = false;
                 motionState = {};
+                asyncPlanner.cancel();
                 plannedMotion.reset();
                 pendingPlan = true;
+                planningError.clear();
                 draggingTarget = false;
             }
         }
@@ -640,6 +652,12 @@ int main() {
 
         if (canvasTool == CanvasTool::Target && mouseInCanvas &&
             IsMouseButtonDown(MOUSE_BUTTON_LEFT)) {
+            if (!draggingTarget) {
+                asyncPlanner.cancel();
+                plannedMotion.reset();
+                planningError.clear();
+                for (auto& joint : joints) joint.angularVelocity = 0.0;
+            }
             target = worldMouse;
             draggingTarget = true;
         }
@@ -655,20 +673,29 @@ int main() {
             accumulator += std::min(static_cast<double>(GetFrameTime()), 0.1);
             for (int steps = 0; accumulator >= fixedDt && steps < 6; ++steps) {
                 if (draggingTarget) {
-                    if (joints.size() == 2 && obstacles.empty()) {
-                        motionState = advanceTowardTarget(joints, target, fixedDt,
-                                                          motionSettings, robot.limits);
-                    } else {
-                        // Wait for the committed target; do not follow an old path.
-                        for (auto& joint : joints) joint.angularVelocity = 0.0;
-                    }
+                    // Never execute a path toward a target that is still moving.
+                    motionState = {};
                 } else {
                     if (pendingPlan) {
-                        plannedMotion.setTarget(joints, robot.limits, target, motionSettings, obstacles);
+                        plannedMotion.reset();
+                        planningError.clear();
+                        (void)asyncPlanner.submit(joints, robot.limits, target,
+                                                  motionSettings, obstacles);
                         pendingPlan = false;
                     }
-                    motionState = plannedMotion.advance(joints, robot.limits,
-                                                         fixedDt, motionSettings, obstacles);
+                    if (auto result = asyncPlanner.takeResult()) {
+                        if (!result->error.empty()) {
+                            planningError = result->error;
+                            plannedMotion.reset();
+                        } else {
+                            plannedMotion.usePlan(std::move(result->plan), result->target);
+                        }
+                    }
+                    if (plannedMotion.hasTarget())
+                        motionState = plannedMotion.advance(
+                            joints, robot.limits, fixedDt, motionSettings, obstacles);
+                    else
+                        motionState = {};
                 }
                 simulatedTime += fixedDt;
                 accumulator -= fixedDt;
@@ -682,6 +709,7 @@ int main() {
         const bool reached = !draggingTarget && motionState.reached &&
                              error <= motionSettings.positionTolerance;
         const bool stalled = !reached && motionState.blocked;
+        const bool planning = asyncPlanner.busy();
         const double radius = target.length();
         bool unreachable = radius > reach;
         if (joints.size() == 2) {
@@ -701,7 +729,7 @@ int main() {
         BeginScissorMode(0, headerHeight, canvasWidth, height - headerHeight);
         drawScene(viewport, obstacles, selectedObstacle);
         drawArm(viewport, positions, target,
-                !unreachable && !(!draggingTarget && plannedMotion.searchFailed()));
+                !unreachable && !(plannedMotion.searchFailed() || !planningError.empty()));
         EndScissorMode();
         DrawText("T Target   C Circle   B Box   V Move   DEL Remove   SPACE Pause   2-5 Presets",
                  20, height - 28, 15, muted);
@@ -756,7 +784,11 @@ int main() {
             drawSidebar(width, height, joints, target, positions.back(), velocity,
                         error, simulatedTime, paused, reached, stalled,
                         motionState.constrained, unreachable,
-                        !draggingTarget && plannedMotion.searchFailed());
+                        plannedMotion.searchFailed() || !planningError.empty(),
+                        planning,
+                        !planningError.empty() ? planningError.c_str() :
+                        robotics::kinematics::planningFailureMessage(
+                            plannedMotion.failureReason()));
         }
         EndDrawing();
     }

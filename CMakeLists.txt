@@ -18,7 +18,11 @@ add_library(robotics_core STATIC
     src/PathPlanning2D.cpp
     src/RobotConfiguration2D.cpp
     src/Obstacles2D.cpp
+    src/AsyncPlanner2D.cpp
 )
+
+find_package(Threads REQUIRED)
+target_link_libraries(robotics_core PUBLIC Threads::Threads)
 
 target_include_directories(robotics_core PUBLIC
     "${PROJECT_SOURCE_DIR}/include"
@@ -114,3 +118,7 @@ set_tests_properties(ReleaseMotionStress PROPERTIES LABELS "stress;release" TIME
 add_executable(test_obstacles tests/test_obstacles.cpp)
 target_link_libraries(test_obstacles PRIVATE robotics_core)
 add_test(NAME Obstacles2D COMMAND test_obstacles)
+
+add_executable(test_async_planner tests/test_async_planner.cpp)
+target_link_libraries(test_async_planner PRIVATE robotics_core)
+add_test(NAME AsyncPlanner2D COMMAND test_async_planner)

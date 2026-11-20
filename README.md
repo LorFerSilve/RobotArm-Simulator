@@ -332,3 +332,20 @@ invalid starting configurations, the planner and the actual follower.
 It also verifies a known reachable **long-way obstacle detour** where the
 shorter shoulder rotation crosses a circle.
 The existing 120-case and 600-case motion matrix tests still run in CI.
+
+## Phase 3 — Non-blocking, cancelable planning and error reasons
+
+Robot path planning uses a C++20 `std::jthread` worker through
+`AsyncPlanner2D`. The GUI stays responsive while multi-start IK and RRT
+run. A new mouse target, obstacle edit, robot preset or reset cancels the
+previous search; outdated results are never installed.
+
+The planner reports differentiated statuses: `OUT OF REACH`, `TARGET
+BLOCKED`, `NO VALID IK SOLUTION`, `SEARCH BUDGET EXHAUSTED`, and
+`PLANNING CANCELLED`. Failed searches still stop safely rather than
+moving the robot through the target or another arm link.
+
+Existing synchronous planner functions remain available for CLI, tests,
+and other code. Async and diagnostics regressions are included in CTest.
+A finite RRT sampling budget still makes the planner *incomplete*; a
+search-budget failure is not a proof of impossibility.

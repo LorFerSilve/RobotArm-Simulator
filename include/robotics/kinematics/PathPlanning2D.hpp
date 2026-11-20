@@ -5,15 +5,28 @@
 
 #include <cstddef>
 #include <span>
+#include <stop_token>
 #include <vector>
 
 namespace robotics::kinematics {
+
+enum class PlanningFailure2D {
+    None,
+    Cancelled,
+    OutOfReach,
+    GoalInObstacle,
+    NoIKSolution,
+    PathSearchExhausted
+};
+
+[[nodiscard]] const char* planningFailureMessage(PlanningFailure2D reason) noexcept;
 
 struct PlannedJointPath2D {
     // Includes the initial configuration and the terminal IK configuration.
     // Empty if a collision-free solution was not found within the search budget.
     std::vector<std::vector<double>> waypoints;
     double terminalError{};
+    PlanningFailure2D failure{PlanningFailure2D::None};
 
     [[nodiscard]] bool found() const noexcept { return !waypoints.empty(); }
 };
@@ -26,13 +39,16 @@ struct PlannedJointPath2D {
     std::span<const JointLimits2D> limits,
     math::Vec2 target,
     const MotionSettings2D& settings = {},
-    std::span<const geometry::Obstacle2D> obstacles = {});
+    std::span<const geometry::Obstacle2D> obstacles = {},
+    std::stop_token cancellation = {});
 
 // Stateful path follower: execute planned joint-space waypoints with bounded
 // joint velocity and acceleration, checking collisions before each step.
 class PlannedMotion2D {
 public:
     void reset() noexcept;
+    // Install an already computed path without repeating IK/RRT on the UI thread.
+    void usePlan(PlannedJointPath2D plan, math::Vec2 target);
     void setTarget(std::span<const Joint2D> joints,
                    std::span<const JointLimits2D> limits,
                    math::Vec2 target,
@@ -45,6 +61,7 @@ public:
                                           std::span<const geometry::Obstacle2D> obstacles = {});
     [[nodiscard]] bool pathAvailable() const noexcept { return !path_.empty(); }
     [[nodiscard]] bool searchFailed() const noexcept { return failed_; }
+    [[nodiscard]] PlanningFailure2D failureReason() const noexcept { return failure_; }
     [[nodiscard]] bool hasTarget() const noexcept { return hasTarget_; }
     [[nodiscard]] math::Vec2 target() const noexcept { return target_; }
 
@@ -56,6 +73,7 @@ private:
     math::Vec2 target_{};
     bool hasTarget_{};
     bool failed_{};
+    PlanningFailure2D failure_{PlanningFailure2D::None};
 };
 
 } // namespace robotics::kinematics

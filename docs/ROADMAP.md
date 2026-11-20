@@ -39,10 +39,12 @@ A bounded RRT planner can attempt to route around fixed obstacles; global
 completeness and real-time replanning are not yet guaranteed.
 
 - [x] Integrate obstacle checks into every configuration-space path edge and follower step.
-- [ ] Improve the planner's search coverage and report *why* planning failed:
-      no IK goal, exhausted sample budget, collision, or limited workspace.
-- [ ] Move planning off the GUI rendering thread and support cancellation when
-      the target/robot/obstacles change.
+- [x] Report specific planning failures: no IK solution, exhausted sample
+      budget, target inside an obstacle, cancellation, or out-of-reach goal.
+- [ ] Improve search coverage for difficult constrained workspaces (adaptive
+      budget and goal sampling) without weakening collision checks.
+- [x] Run planning on a C++20 worker; cancel superseded jobs when targets,
+      robot geometry, or obstacles change. Prevent stale results from applying.
 - [ ] Replace stop-at-waypoint quintic interpolation with continuous,
       corner-blended, jerk-aware trajectories while preserving collision
       clearance. The current coordinated follower is safe but briefly
@@ -129,8 +131,8 @@ completeness and real-time replanning are not yet guaranteed.
    A bounded sampling algorithm is **not complete** and can still return
    `NO SAFE PATH FOUND` for a reachable target. This result must not be
    presented as proof of geometric impossibility.
-3. **Planning pauses GUI rendering**: current search runs synchronously when
-   releasing the mouse; move it to a cancelable worker in Phase 3.
+3. **Planning pauses GUI rendering**: resolved with an asynchronous C++20
+   worker and stop-token cancellation on new targets/scene changes.
 4. **Path corners may stop briefly**: the follower intentionally settles at
    intermediate waypoints to avoid unsafe corner cutting. Smooth continuous
    paths will require trajectory generation in Phase 3.
