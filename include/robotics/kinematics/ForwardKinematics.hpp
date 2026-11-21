@@ -15,4 +15,11 @@ namespace robotics::kinematics {
 [[nodiscard]] std::vector<math::Vec2> forwardKinematics(
     std::span<const Joint2D> joints);
 
+// Planner fast path: evaluate alternate joint angles directly into a reusable
+// output buffer. Avoids allocating/copying a temporary Joint2D vector for
+// each candidate configuration. Angles must match the number of links.
+void forwardKinematics(std::span<const Joint2D> joints,
+                       std::span<const double> angles,
+                       std::vector<math::Vec2>& positions);
+
 } // namespace robotics::kinematics

@@ -68,6 +68,21 @@ double segmentBoxSquared(math::Vec2 a, math::Vec2 b, const Box2D& box) {
     return best;
 }
 
+// Collision geometry after validation. Keeping the per-link inner loop free
+// of repeated shape and point checks improves planning with multiple obstacles.
+bool segmentHitsObstacleUnchecked(math::Vec2 from, math::Vec2 to,
+                                  const Obstacle2D& obstacle,
+                                  double clearance) {
+    return std::visit([&](const auto& value) {
+        if constexpr (std::is_same_v<std::decay_t<decltype(value)>, Circle2D>) {
+            const double radius = value.radius + clearance;
+            return pointSegmentSquared(value.center, from, to) <= radius * radius;
+        } else {
+            return segmentBoxSquared(from, to, value) <= clearance * clearance;
+        }
+    }, obstacle);
+}
+
 void requireValid(const Obstacle2D& obstacle, double clearance) {
     if (!validObstacle(obstacle) || !std::isfinite(clearance) || clearance < 0.0)
         throw std::invalid_argument("Invalid obstacle geometry or clearance");
@@ -107,14 +122,7 @@ bool segmentHitsObstacle(math::Vec2 from, math::Vec2 to,
     requireValid(obstacle, clearance);
     if (!finite(from) || !finite(to))
         throw std::invalid_argument("Invalid arm segment");
-    return std::visit([&](const auto& value) {
-        if constexpr (std::is_same_v<std::decay_t<decltype(value)>, Circle2D>) {
-            const double radius = value.radius + clearance;
-            return pointSegmentSquared(value.center, from, to) <= radius * radius;
-        } else {
-            return segmentBoxSquared(from, to, value) <= clearance * clearance;
-        }
-    }, obstacle);
+    return segmentHitsObstacleUnchecked(from, to, obstacle, clearance);
 }
 
 bool hasObstacleCollision(std::span<const math::Vec2> positions,
@@ -127,8 +135,8 @@ bool hasObstacleCollision(std::span<const math::Vec2> positions,
     for (const auto& obstacle : obstacles) {
         requireValid(obstacle, clearance);
         for (std::size_t i = 1; i < positions.size(); ++i)
-            if (segmentHitsObstacle(positions[i - 1], positions[i],
-                                    obstacle, clearance)) return true;
+            if (segmentHitsObstacleUnchecked(positions[i - 1], positions[i],
+                                             obstacle, clearance)) return true;
     }
     return false;
 }

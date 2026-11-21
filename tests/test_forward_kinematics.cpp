@@ -44,6 +44,53 @@ int main() {
     check(forwardKinematics(std::vector<Joint2D>{}).size() == 1,
           "empty arm returns origin");
 
+    // Reusable FK buffer must match the legacy path for varied joint counts,
+    // while leaving the original robot state and the output allocation intact.
+    std::vector<robotics::math::Vec2> reusable;
+    reusable.reserve(20);
+    const auto* allocated = reusable.data();
+    for (int count = 2; count <= 7; ++count) {
+        std::vector<Joint2D> robot;
+        std::vector<double> angles;
+        for (int i = 0; i < count; ++i) {
+            robot.push_back({0.6 + 0.2 * i, 0.1 * i});
+            angles.push_back((i % 2 ? -1.0 : 1.0) * (0.2 + 0.17 * i));
+        }
+        auto pose = robot;
+        for (std::size_t i = 0; i < pose.size(); ++i)
+            pose[i].angle = angles[i];
+        const auto expected = forwardKinematics(pose);
+        forwardKinematics(robot, angles, reusable);
+        check(reusable.data() == allocated, "FK reuses reserved storage");
+        check(reusable.size() == expected.size(), "FK override count");
+        for (std::size_t i = 0; i < reusable.size(); ++i) {
+            check(near(reusable[i].x, expected[i].x) &&
+                  near(reusable[i].y, expected[i].y),
+                  "FK override matches original calculation");
+        }
+        check(near(robot[0].angle, 0.0),
+              "FK override does not mutate robot angles");
+    }
+
+    bool wrongCountRejected = false;
+    try {
+        forwardKinematics(straight, std::vector<double>{0.0}, reusable);
+    } catch (const std::invalid_argument&) {
+        wrongCountRejected = true;
+    }
+    check(wrongCountRejected, "FK override rejects mismatched angle count");
+
+    bool invalidOverrideRejected = false;
+    try {
+        forwardKinematics(straight,
+            std::vector<double>{0.0, std::numeric_limits<double>::quiet_NaN()},
+            reusable);
+    } catch (const std::invalid_argument&) {
+        invalidOverrideRejected = true;
+    }
+    check(invalidOverrideRejected, "FK override rejects nonfinite angles");
+
+
     const auto rejects = [](const Joint2D& joint) {
         try {
             (void)forwardKinematics(std::vector<Joint2D>{joint});

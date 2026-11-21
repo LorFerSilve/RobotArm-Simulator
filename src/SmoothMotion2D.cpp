@@ -107,44 +107,67 @@ std::vector<double> analyticTwoLinkPose(std::span<const Joint2D> joints,
 
 } // namespace
 
-std::vector<double> targetLinkPenetrations(std::span<const math::Vec2> positions,
-                                           math::Vec2 target, double clearance) {
+namespace {
+
+void validateTargetGeometry(std::span<const math::Vec2> positions,
+                            math::Vec2 target, double clearance) {
     if (positions.size() < 2 || !finite(target) || !std::isfinite(clearance) ||
         clearance < 0.0)
         throw std::invalid_argument("Invalid target approach geometry");
     for (const auto& point : positions)
         if (!finite(point)) throw std::invalid_argument("Invalid arm point");
+}
 
-    std::vector<double> depths(positions.size() - 1, 0.0);
-    if (clearance == 0.0) return depths;
-
-    const std::size_t last = depths.size() - 1;
-    const bool toolNearTarget = (target - positions.back()).length() <=
-                                2.0 * clearance;
-    for (std::size_t i = 0; i < depths.size(); ++i) {
-        auto shaftEnd = positions[i + 1];
-
-        // The tool is at the very end of the final link, not the whole link.
-        // When the tip approaches the target, only its short terminal portion
-        // may enter the target disk; the remaining shaft is always protected.
-        if (i == last && toolNearTarget) {
-            const auto shaft = positions[i + 1] - positions[i];
-            const double length = shaft.length();
-            const double toolLength = std::min(2.0 * clearance, 0.4 * length);
-            shaftEnd = positions[i] + shaft * ((length - toolLength) / length);
-        }
-
-        const double distance = pointDistance(target, positions[i], shaftEnd);
-        depths[i] = std::max(0.0, clearance - distance);
+// Shared point-to-link calculation: the *same* tool-tip allowance is used
+// by both the allocation-free safety predicate and penetration-depth queries.
+double targetDepthAt(std::span<const math::Vec2> positions, std::size_t index,
+                     math::Vec2 target, double clearance, bool toolNearTarget) {
+    auto shaftEnd = positions[index + 1];
+    if (index + 2 == positions.size() && toolNearTarget) {
+        const auto shaft = positions[index + 1] - positions[index];
+        const double length = shaft.length();
+        const double toolLength = std::min(2.0 * clearance, 0.4 * length);
+        shaftEnd = positions[index] + shaft * ((length - toolLength) / length);
     }
+    return std::max(0.0,
+        clearance - pointDistance(target, positions[index], shaftEnd));
+}
+
+} // namespace
+
+void targetLinkPenetrations(std::span<const math::Vec2> positions,
+                            math::Vec2 target, double clearance,
+                            std::span<double> depths) {
+    validateTargetGeometry(positions, target, clearance);
+    if (depths.size() != positions.size() - 1)
+        throw std::invalid_argument("Target-depth buffer must match link count");
+    std::fill(depths.begin(), depths.end(), 0.0);
+    if (clearance == 0.0) return;
+
+    const bool toolNearTarget =
+        (target - positions.back()).length() <= 2.0 * clearance;
+    for (std::size_t i = 0; i < depths.size(); ++i)
+        depths[i] = targetDepthAt(positions, i, target, clearance, toolNearTarget);
+}
+
+std::vector<double> targetLinkPenetrations(
+    std::span<const math::Vec2> positions, math::Vec2 target, double clearance) {
+    std::vector<double> depths(positions.empty() ? 0 : positions.size() - 1);
+    targetLinkPenetrations(positions, target, clearance, depths);
     return depths;
 }
 
 bool targetApproachClear(std::span<const math::Vec2> positions,
                          math::Vec2 target, double clearance) {
-    const auto depths = targetLinkPenetrations(positions, target, clearance);
-    return std::all_of(depths.begin(), depths.end(),
-                       [](double depth) { return depth == 0.0; });
+    validateTargetGeometry(positions, target, clearance);
+    if (clearance == 0.0) return true;
+
+    const bool toolNearTarget =
+        (target - positions.back()).length() <= 2.0 * clearance;
+    for (std::size_t i = 0; i + 1 < positions.size(); ++i)
+        if (targetDepthAt(positions, i, target, clearance, toolNearTarget) != 0.0)
+            return false;
+    return true;
 }
 
 bool hasSelfCollision(std::span<const math::Vec2> positions, double clearance) {

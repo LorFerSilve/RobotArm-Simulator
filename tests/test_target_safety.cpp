@@ -1,6 +1,7 @@
 #include "robotics/kinematics/PathPlanning2D.hpp"
 #include "robotics/kinematics/ForwardKinematics.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <iostream>
 #include <numbers>
@@ -37,6 +38,39 @@ int main() {
             std::vector<Vec2>{{0, 0}, {2, 0}, {4, 0}}, {3.7, 0}, 0.16);
         require(closeShaft.back() > 0.0,
                 "Target penetration must report last-link shaft contact");
+
+        // The allocation-free query, reusable penetration buffer and legacy
+        // vector-returning query must agree, including last-link tool contact.
+        const std::vector<Vec2> probe{{0, 0}, {2, 0}, {4, 0}};
+        std::vector<double> reusableDepths(2, -1.0);
+        const auto* depthStorage = reusableDepths.data();
+        for (const auto& target : std::vector<Vec2>{
+                {1.0, 0.0}, {3.7, 0.0}, {3.95, 0.0},
+                {4.0, 0.0}, {5.0, 5.0}}) {
+            for (double clearance : {0.0, 0.16, 0.3}) {
+                const auto legacy =
+                    targetLinkPenetrations(probe, target, clearance);
+                targetLinkPenetrations(probe, target, clearance, reusableDepths);
+                require(reusableDepths.data() == depthStorage,
+                        "Depth query reuses caller-owned storage");
+                require(reusableDepths == legacy,
+                        "Buffered and vector target depths agree");
+                const bool allClear = std::all_of(
+                    legacy.begin(), legacy.end(),
+                    [](double depth) { return depth == 0.0; });
+                require(targetApproachClear(probe, target, clearance) == allClear,
+                        "Allocation-free target test agrees with depths");
+            }
+        }
+        bool rejectedShortDepths = false;
+        try {
+            std::vector<double> tooShort(1);
+            targetLinkPenetrations(probe, {3.7, 0}, 0.16, tooShort);
+        } catch (const std::invalid_argument&) {
+            rejectedShortDepths = true;
+        }
+        require(rejectedShortDepths, "Depth query rejects wrong buffer size");
+
 
         require(targetApproachClear(
             std::vector<Vec2>{{0, 0}, {0, 2}, {2, 2}}, {-1, 2}, 0.16),

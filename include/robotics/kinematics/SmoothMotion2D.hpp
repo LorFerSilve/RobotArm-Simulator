@@ -52,6 +52,12 @@ struct MotionStatus2D {
 [[nodiscard]] std::vector<double> targetLinkPenetrations(
     std::span<const math::Vec2> positions, math::Vec2 target, double clearance);
 
+// Reuse caller-owned per-link storage in the planner's inner collision loop.
+// The buffer must have positions.size() - 1 entries.
+void targetLinkPenetrations(std::span<const math::Vec2> positions,
+                            math::Vec2 target, double clearance,
+                            std::span<double> depths);
+
 // The target represents a small physical object. Links except the tool-end
 // must keep clearance; the final link can approach within the tool-tip zone.
 // Clearance zero disables the target-object check for legacy simulations.

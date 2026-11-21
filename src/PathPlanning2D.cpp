@@ -45,9 +45,9 @@ struct SearchContext {
     }
 
     [[nodiscard]] std::vector<math::Vec2> positions(const Angles& q) const {
-        auto robot = joints;
-        for (std::size_t i = 0; i < q.size(); ++i) robot[i].angle = q[i];
-        return forwardKinematics(robot);
+        std::vector<math::Vec2> result;
+        forwardKinematics(joints, q, result);
+        return result;
     }
 
     [[nodiscard]] bool validJointAngles(const Angles& q) const {
@@ -67,23 +67,28 @@ struct SearchContext {
         return true;
     }
 
-    [[nodiscard]] bool validRobot(const Angles& q) const {
-        if (!validJointAngles(q)) return false;
-        const auto points = positions(q);
+    [[nodiscard]] bool collisionFreeRobot(
+        std::span<const math::Vec2> points) const {
         return !hasSelfCollision(points, settings.linkClearance) &&
                !geometry::hasObstacleCollision(points, obstacles,
                                                 settings.obstacleClearance);
     }
 
+    [[nodiscard]] bool validRobot(const Angles& q) const {
+        return validJointAngles(q) && collisionFreeRobot(positions(q));
+    }
+
     [[nodiscard]] bool valid(const Angles& q) const {
-        return validRobot(q) &&
-               targetApproachClear(positions(q), target, settings.targetClearance);
+        if (!validJointAngles(q)) return false;
+        const auto points = positions(q);
+        return collisionFreeRobot(points) &&
+               targetApproachClear(points, target, settings.targetClearance);
     }
 
     // Distance to the entire arm, including its tool, used only to prove
     // that a portion of the path is too far away to hit the target.
-    [[nodiscard]] double nearestLinkDistance(const Angles& q) const {
-        const auto points = positions(q);
+    [[nodiscard]] double nearestLinkDistance(
+        std::span<const math::Vec2> points) const {
         double best = std::numeric_limits<double>::infinity();
         for (std::size_t i = 1; i < points.size(); ++i) {
             const auto ab = points[i] - points[i - 1];
@@ -100,13 +105,23 @@ struct SearchContext {
     // decreases monotonically for every link (never introduce new contact).
     // Once outside the keep-out zone, re-entry is forbidden.
     [[nodiscard]] bool edge(const Angles& a, const Angles& b) const {
-        if (!validRobot(a)) return false;
-        auto previous = targetLinkPenetrations(positions(a), target,
-                                                settings.targetClearance);
+        if (!validJointAngles(a)) return false;
+
+        // One reusable FK and two target-depth buffers per edge instead of
+        // copying the robot and allocating geometry/depths at every sample.
+        std::vector<math::Vec2> points;
+        forwardKinematics(joints, a, points);
+        if (!collisionFreeRobot(points)) return false;
+
+        std::vector<double> previous(joints.size());
+        std::vector<double> next(joints.size());
+        targetLinkPenetrations(points, target, settings.targetClearance, previous);
+
         double maxDelta = 0.0;
         for (std::size_t i = 0; i < a.size(); ++i)
             maxDelta = std::max(maxDelta, std::abs(a[i] - b[i]));
-        const auto steps = std::max(1, static_cast<int>(std::ceil(maxDelta / edgeResolution)));
+        const auto steps = std::max(
+            1, static_cast<int>(std::ceil(maxDelta / edgeResolution)));
         Angles from = a;
         Angles to(a.size());
         Angles q(a.size());
@@ -116,12 +131,10 @@ struct SearchContext {
             const double alpha = static_cast<double>(step) / steps;
             for (std::size_t i = 0; i < q.size(); ++i)
                 to[i] = a[i] + alpha * (b[i] - a[i]);
-            if (!validRobot(to)) return false;
+            if (!validJointAngles(to)) return false;
 
-            // An angular step of 0.04 rad can move the end of a long
-            // multi-link arm by much more than the 0.16 m target diameter.
-            // Bound the travel of any point on the arm using downstream
-            // link lengths. Only subdivide further when contact is possible.
+            // Bound Cartesian movement of all links between consecutive
+            // samples; preserve target clearance and scene-obstacle margins.
             int checks = 1;
             if (settings.targetClearance > 0.0) {
                 double downstream = 0.0;
@@ -130,7 +143,7 @@ struct SearchContext {
                     downstream += joints[i].length;
                     maximumTravel += downstream * std::abs(to[i] - from[i]);
                 }
-                if (nearestLinkDistance(from) <=
+                if (nearestLinkDistance(points) <=
                     settings.targetClearance + maximumTravel) {
                     const double maxTravelPerCheck =
                         std::max(0.02, settings.targetClearance * 0.4);
@@ -138,9 +151,6 @@ struct SearchContext {
                         std::ceil(maximumTravel / maxTravelPerCheck)));
                 }
             }
-            // An obstacle can also be skipped by a wide Cartesian sweep
-            // between adjacent joint samples. Constrain the maximum travel
-            // of any link point when scene obstacles are present.
             if (!obstacles.empty()) {
                 double downstream = 0.0, maximumTravel = 0.0;
                 for (std::size_t i = q.size(); i-- > 0;) {
@@ -150,18 +160,24 @@ struct SearchContext {
                 checks = std::max(checks, std::max(1,
                     static_cast<int>(std::ceil(maximumTravel / 0.04))));
             }
+
             for (int sub = 1; sub <= checks; ++sub) {
                 if (cancelled()) return false;
                 const double fraction = static_cast<double>(sub) / checks;
                 for (std::size_t i = 0; i < q.size(); ++i)
                     q[i] = from[i] + fraction * (to[i] - from[i]);
-                if (!validRobot(q)) return false;
-                const auto next = targetLinkPenetrations(positions(q), target,
-                                                         settings.targetClearance);
+                if (!validJointAngles(q)) return false;
+                forwardKinematics(joints, q, points);
+                if (!collisionFreeRobot(points)) return false;
+
+                targetLinkPenetrations(
+                    points, target, settings.targetClearance, next);
                 for (std::size_t i = 0; i < next.size(); ++i)
                     if (next[i] > previous[i] + 1e-9) return false;
-                previous = next;
+                previous.swap(next);
             }
+            // "points" now contains the geometry of "to", ready for the
+            // next outer step's swept-target proximity estimate.
             from = to;
         }
         return true;

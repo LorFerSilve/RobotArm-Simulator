@@ -68,6 +68,28 @@ int main() {
                                       std::vector<Obstacle2D>{Circle2D{{5.0, 5.0}, 0.3}},
                                       0.1),
                 "Far scene is safe");
+
+        // hasObstacleCollision must agree with the public segment predicate,
+        // even though its inner loop now skips duplicate validation work.
+        const std::vector<Vec2> chain{{0, 0}, {2, 0}, {2, 2}, {3, 1}};
+        const std::vector<Obstacle2D> shapes{
+            Circle2D{{1.0, 0.2}, 0.1},
+            Circle2D{{5.0, 5.0}, 0.3},
+            Box2D{{2.1, 1.0}, 0.2, 0.25},
+            Box2D{{-2.0, -2.0}, 0.5, 0.5}
+        };
+        for (const double margin : {0.0, 0.10, 0.35}) {
+            for (const auto& shape : shapes) {
+                bool expected = false;
+                for (std::size_t i = 1; i < chain.size(); ++i)
+                    expected |= segmentHitsObstacle(
+                        chain[i-1], chain[i], shape, margin);
+                require(hasObstacleCollision(
+                            chain, std::vector<Obstacle2D>{shape}, margin) == expected,
+                        "Batch obstacle check agrees with segment-by-segment check");
+            }
+        }
+
         for (const Obstacle2D invalid : {
                 Obstacle2D{Circle2D{{0.0, 0.0}, -1.0}},
                 Obstacle2D{Box2D{{0.0, 0.0}, 0.0, 1.0}}}) {

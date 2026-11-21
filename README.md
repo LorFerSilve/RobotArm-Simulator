@@ -478,3 +478,22 @@ suite remain active. The `ObstacleTipOptimization` regression includes
 a circle that blocks a short shoulder turn, compares the selected route
 against a known-safe full-turn route, checks a redundant-arm obstacle
 scenario, and executes both trajectories frame by frame.
+
+## Core engine audit (memory, performance, SOLID / GRASP)
+
+A focused audit is documented in
+[docs/ENGINE_AUDIT.md](docs/ENGINE_AUDIT.md). It reviews the actual
+C++20 implementation, its existing architectural boundaries and the
+highest-frequency allocation/recomputation sites.
+
+The main changes are a reusable forward-kinematics buffer for evaluating
+candidate joint angles, a shared collision-geometry check without duplicate
+FK work, allocation-free target-clearance predicates, reusable target-depth
+buffers during swept-edge checking, and no repeated obstacle-shape validation
+inside link-by-link batch queries. Original public APIs are preserved.
+
+All safety predicates, cancellation and trajectory-sampling constraints
+remain active, with new cross-check tests against the original geometry
+APIs. **No percentage speedup is claimed without a controlled benchmark.**
+The audit includes the next measurements and architecture refactors that
+would be justified by actual usage.

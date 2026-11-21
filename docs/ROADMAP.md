@@ -161,6 +161,22 @@ completeness and real-time replanning are not yet guaranteed.
    while a Visual Studio multi-config generator writes
    `build/Debug/robot_gui.exe`. This is expected, not a simulator bug.
 
+## Engine performance and maintainability audit
+
+- [x] Review FK, collision, planner, asynchronous boundary, tests and GUI
+      structure; record measured-versus-hypothesized opportunities in
+      [ENGINE_AUDIT.md](ENGINE_AUDIT.md).
+- [x] Remove temporary robot copies from planner FK queries; share the same
+      FK math and reuse a positions buffer in the swept-edge loop.
+- [x] Stop repeated FK work and target-depth vector allocation in sampled
+      planner safety checks, preserving exact safety conditions.
+- [x] Avoid repeated obstacle-shape validation inside multi-link collision
+      batch queries.
+- [ ] Collect apples-to-apples Release-mode p50/p95 planning timings and
+      allocation counts before any major data-structure redesign.
+- [ ] Consider separate trajectory implementation and GUI editor modules
+      when their responsibilities next need substantial changes.
+
 ## Acceptance tests for future changes
 
 - Preserve the existing two-joint smooth movement and elbow constraints.
