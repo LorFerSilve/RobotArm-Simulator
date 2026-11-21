@@ -1036,15 +1036,20 @@ int main() {
                              error <= motionSettings.positionTolerance;
         const bool stalled = !reached && motionState.blocked;
         const bool planning = asyncPlanner.busy();
-        const double radius = target.length();
-        bool unreachable = radius > reach;
-        if (joints.size() == 2) {
+        const double radius = displayTarget.length();
+        double displayReach = 0.0;
+        for (const auto& joint : displayJoints) displayReach += joint.length;
+        bool unreachable = radius > displayReach;
+        if (displayJoints.size() == 2) {
             const double margin = motionSettings.jointClearance;
-            const double innerRadius = std::hypot(joints[0].length + joints[1].length *
-                std::cos(std::numbers::pi - motionSettings.foldClearance), joints[1].length *
+            const double innerRadius = std::hypot(displayJoints[0].length +
+                displayJoints[1].length *
+                std::cos(std::numbers::pi - motionSettings.foldClearance),
+                displayJoints[1].length *
                 std::sin(std::numbers::pi - motionSettings.foldClearance));
-            const double outerRadius = std::hypot(joints[0].length + joints[1].length *
-                std::cos(margin), joints[1].length * std::sin(margin));
+            const double outerRadius = std::hypot(displayJoints[0].length +
+                displayJoints[1].length * std::cos(margin),
+                displayJoints[1].length * std::sin(margin));
             unreachable = radius < innerRadius || radius > outerRadius;
         }
 
