@@ -20,6 +20,7 @@ add_library(robotics_core STATIC
     src/Obstacles2D.cpp
     src/AsyncPlanner2D.cpp
     src/Telemetry2D.cpp
+    src/SweptCollision2D.cpp
 )
 
 find_package(Threads REQUIRED)
@@ -147,3 +148,8 @@ add_test(NAME ObstacleTipOptimization COMMAND test_obstacle_tip_optimization)
 add_executable(test_telemetry tests/test_telemetry.cpp)
 target_link_libraries(test_telemetry PRIVATE robotics_core)
 add_test(NAME Telemetry2D COMMAND test_telemetry)
+
+# 2D-A: conservative continuous swept-link certification for the planner.
+add_executable(test_swept_collision tests/test_swept_collision.cpp)
+target_link_libraries(test_swept_collision PRIVATE robotics_core)
+add_test(NAME SweptCollision2D COMMAND test_swept_collision)

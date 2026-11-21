@@ -86,6 +86,58 @@ completeness and real-time replanning are not yet guaranteed.
 - [ ] Consider optional full-session/unbounded capture for long experiments
       if the current rolling 60-second recording proves insufficient.
 
+### New 2D hardening roadmap — before Phase 5
+
+The 3D phase remains deliberately postponed. Complete these 2D
+milestones before generalizing spatial representations.
+
+#### 2D-A — Geometry and collision safety
+
+- [x] Add conservative interval certification for **continuous self- and
+      scene-obstacle safety** along linear joint-space edges. Use a bound
+      on possible link displacement instead of assuming fixed-step
+      collision sampling is sufficient. Reject uncertifiable intervals.
+- [x] Integrate the common swept-link check in the planner's edge
+      validator (also used by follower and spline checks).
+- [x] Regress a narrow obstacle missed by uniform angular sampling and
+      a four-link self-contact occurring between safe endpoints.
+- [ ] Replace the current target-as-point / short tool-tip exception
+      with an explicit target-object shape and tool contact geometry.
+- [ ] Extend continuous safety certification to target-object approach,
+      including the special case of safe retreat from initial contact.
+- [ ] Support custom link radii where needed, with one consistent
+      clearance convention in planning, execution and visualization.
+- [ ] Add adversarial checks near tangencies and narrow passages; keep
+      rejection conservative if a safe path cannot be certified.
+
+#### 2D-B — Robust IK and planning
+
+- [ ] Improve goal search in difficult redundant configurations with
+      adaptive bounded sampling and more informative failure causes.
+- [ ] Explore only physically valid joint-branch transitions.
+- [ ] Retain collision-aware shortest-tool-path heuristics without
+      replacing safety with a distance objective.
+
+#### 2D-C — Motion controller and trajectory quality
+
+- [ ] Keep velocity/acceleration continuous across retargeting and
+      distinguish controlled stop from emergency stop.
+- [ ] Refine spline corner treatment while preserving verified clearance.
+
+#### 2D-D — End-effector pose and manipulation
+
+- [ ] Support orientation targets (x, y, theta) for robots with
+      sufficient degrees of freedom.
+- [ ] Model a tool contact frame and basic, meaningful approach tasks.
+
+#### 2D-E — Validation and architecture hardening
+
+- [ ] Capture full replayable **planning scenarios**, including all joint
+      limits, motion settings and scene state (beyond GUI-frame replay).
+- [ ] Add deterministic safety/property regressions for new features.
+- [ ] Split existing planner/GUI modules only if the next change
+      meaningfully benefits from clearer responsibilities.
+
 ### Phase 5 — 3D robot kinematics
 
 - [ ] Implement Vec3, transformations and spatial forward kinematics.
@@ -125,9 +177,13 @@ completeness and real-time replanning are not yet guaranteed.
       Cartesian sweep could cross the target between angular samples.
 - [ ] Record the **exact joint angles** from the latest multi-joint
       screenshot and promote that case to a required regression.
-- [ ] Implement certified swept-volume collision checking for target and
-      future scene obstacles; the current planner uses conservative sampling,
-      not exact continuous collision detection.
+- [x] Add conservative continuous interval certification for **static
+      scene obstacles and nonadjacent-link contact** on linear joint-space
+      edges (2D-A). It rejects intervals it cannot certify.
+- [ ] Extend that certification to target-object and tool contact:
+      target approach currently uses sampling and a short tip exception.
+- [ ] Support arbitrary curved swept-volume trajectories and moving
+      obstacles before making real-world collision-safety claims.
 
 ## Playtest issues to keep visible
 

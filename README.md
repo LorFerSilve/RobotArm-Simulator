@@ -541,3 +541,32 @@ obstacle preservation and malformed-file rejection. The existing
 `TrajectoryPreview2D` test additionally checks intermediate joint
 traces and predicted final joint angles. The full release motion suite
 remains part of CI.
+
+## New 2D roadmap — 2D-A, Geometry & Collision Safety (first milestone)
+
+A new engine-only function, `sweptArmClear2D()`, now conservatively
+validates **the full linear joint-space interpolation** against static
+circle/rectangle obstacles and nonadjacent-link self-contact. It is
+called by the common planner edge checker, which is also used by the
+trajectory follower and spline validation.
+
+Unlike a fixed number of discrete collision samples, this check derives
+a bound on the maximum displacement of any link endpoint during a time
+interval. If its midpoint has enough clearance to cover that bound,
+the **entire** interval is safe for the represented capsule geometry.
+Otherwise it recursively subdivides the interval. An actual collision,
+cancellation, or unresolved interval at the fixed recursion limit
+**rejects** the edge rather than assuming it is safe.
+
+This is a **conservative collision certificate for straight joint-space
+segments** under the model's numeric accuracy and static scene assumption,
+not continuous collision detection for arbitrary moving obstacles,
+target-tool contact, or real hardware. The existing target-object exception
+and monotonic-contact retreat are still governed by sampled checks; more
+complete target/tool geometry is the next 2D-A milestone.
+
+The `SweptCollision2D` regression covers a very narrow circle contact
+*between* the older 0.04-radian samples, a four-link self-intersection
+whose endpoints are both safe, unobstructed movements, cancellation,
+and input validation. Existing motion and scene regression suites remain
+active.

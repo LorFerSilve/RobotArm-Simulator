@@ -2,6 +2,7 @@
 
 #include "robotics/kinematics/ForwardKinematics.hpp"
 #include "robotics/kinematics/Jacobian2D.hpp"
+#include "robotics/kinematics/SweptCollision2D.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -180,7 +181,13 @@ struct SearchContext {
             // next outer step's swept-target proximity estimate.
             from = to;
         }
-        return true;
+        // Sampling alone cannot rule out a narrow collision between checks.
+        // Certify the whole linear joint-space edge with a conservative
+        // bound on link displacement. Fail closed if certification runs out
+        // of subdivisions or the request was cancelled.
+        return sweptArmClear2D(
+            joints, a, b, obstacles, settings.linkClearance,
+            settings.obstacleClearance, cancellation);
     }
 };
 
