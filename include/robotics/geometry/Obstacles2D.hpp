@@ -33,6 +33,12 @@ using Obstacle2D = std::variant<Circle2D, Box2D>;
                                        const Obstacle2D& obstacle,
                                        double clearance = 0.0);
 
+// Signed minimum distance from a segment to a solid circle/rectangle.
+// Positive outside, zero at contact, negative when crossing the interior.
+// Useful for measuring (rather than merely testing) target penetration.
+[[nodiscard]] double segmentSignedDistanceToObstacle(
+    math::Vec2 from, math::Vec2 to, const Obstacle2D& obstacle);
+
 // All links are considered, including the final tool link. The target-specific
 // tool-tip exception does not apply to scene obstacles.
 [[nodiscard]] bool hasObstacleCollision(

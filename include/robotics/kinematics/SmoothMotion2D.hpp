@@ -1,8 +1,10 @@
 #pragma once
 
 #include "robotics/kinematics/Joint2D.hpp"
+#include "robotics/kinematics/TargetObject2D.hpp"
 #include "robotics/math/Vec2.hpp"
 
+#include <optional>
 #include <span>
 #include <vector>
 
@@ -18,6 +20,9 @@ struct MotionSettings2D {
     double obstacleClearance{0.10};    // robot half-width + obstacle safety margin, m
     double positionTolerance{0.005};  // metres
     double maxAngularJerk{120.0};       // rad/s^3, global spline limit
+    // Explicit target geometry and physical terminal tool section. When
+    // omitted, existing targetClearance behavior is preserved for legacy APIs.
+    std::optional<TargetObject2D> targetObject{};
 };
 
 // Per-joint constraints. The first joint may rotate through zero; for each
@@ -63,6 +68,21 @@ void targetLinkPenetrations(std::span<const math::Vec2> positions,
 // Clearance zero disables the target-object check for legacy simulations.
 [[nodiscard]] bool targetApproachClear(std::span<const math::Vec2> positions,
                                        math::Vec2 target, double clearance);
+
+
+// Explicit target-object contact geometry, independent from the legacy
+// point/radius overloads above. The last link has a specified distal tool
+// length; only that portion may contact the target body. A tip outside the
+// object's contact neighborhood never gets a shaft exemption.
+void targetLinkPenetrations(std::span<const math::Vec2> positions,
+                            math::Vec2 target, const TargetObject2D& object,
+                            std::span<double> depths);
+[[nodiscard]] std::vector<double> targetLinkPenetrations(
+    std::span<const math::Vec2> positions, math::Vec2 target,
+    const TargetObject2D& object);
+[[nodiscard]] bool targetApproachClear(
+    std::span<const math::Vec2> positions, math::Vec2 target,
+    const TargetObject2D& object);
 
 [[nodiscard]] bool hasSelfCollision(std::span<const math::Vec2> positions,
                                     double clearance);

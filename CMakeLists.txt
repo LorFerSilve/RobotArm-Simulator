@@ -153,3 +153,8 @@ add_test(NAME Telemetry2D COMMAND test_telemetry)
 add_executable(test_swept_collision tests/test_swept_collision.cpp)
 target_link_libraries(test_swept_collision PRIVATE robotics_core)
 add_test(NAME SweptCollision2D COMMAND test_swept_collision)
+
+# 2D-A: physical circle/rectangle target and defined terminal tool contact.
+add_executable(test_target_object tests/test_target_object.cpp)
+target_link_libraries(test_target_object PRIVATE robotics_core)
+add_test(NAME TargetObject2D COMMAND test_target_object)

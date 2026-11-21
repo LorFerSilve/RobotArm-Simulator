@@ -570,3 +570,40 @@ The `SweptCollision2D` regression covers a very narrow circle contact
 whose endpoints are both safe, unobstructed movements, cancellation,
 and input validation. Existing motion and scene regression suites remain
 active.
+
+## 2D-A — Explicit target objects and tool-contact geometry
+
+The simulator can now model the selected target as a **solid circle or
+axis-aligned rectangle**, not merely a point with an implicit keep-out
+radius. In the **SCENE** tab, select **TARGET OBJECT** to edit its shape,
+circle radius or rectangle half-dimensions, additional shaft clearance,
+and terminal tool-contact length. The target body is drawn in red and
+the physical contact section on the final link in green.
+
+For explicit models, the core checks **every upstream link and the
+non-tool portion of the final link** against the target object's actual
+geometry and the configured clearance. Only the specified terminal tool
+section may touch the object, and only when the endpoint is within its
+contact neighborhood. Other links and the final shaft cannot use this
+exemption. A newly selected target already intersecting the arm can
+still be approached by the existing non-increasing-penetration retreat
+rule. The geometry also rejects targets containing the immovable base.
+
+The target shape and tool length are carried by `MotionSettings2D`
+through the asynchronous planner, IK goal validation, RRT edge checking,
+spline preparation and execution checks. SCENE edits invalidate the old
+plan. Existing `targetClearance`-based functions remain available so
+older CLI clients and regression fixtures retain their old behavior;
+the GUI opts into the new explicit model.
+
+**Limits of this milestone:** although static-scene/self swept
+collision certificates already exist, the target object's approach
+retreat still checks a sampled penetration profile. Continuous
+target-object contact certification, approach-facing direction,
+and independent link radii remain open in 2D-A and 2D-D.
+
+The new `TargetObject2D` regression checks circle and rectangle
+geometry, exposed tool versus shaft contact, additional margins,
+rectangle penetration depth, invalid configurations, and end-to-end
+planning and execution using the new target model. The existing
+release-motion suites remain unchanged.

@@ -83,6 +83,46 @@ bool segmentHitsObstacleUnchecked(math::Vec2 from, math::Vec2 to,
     }, obstacle);
 }
 
+// Signed distance to a box: negative inside its solid interior.
+double pointBoxSignedDistance(math::Vec2 point, const Box2D& box) {
+    const double dx = std::abs(point.x - box.center.x) - box.halfWidth;
+    const double dy = std::abs(point.y - box.center.y) - box.halfHeight;
+    return std::hypot(std::max(dx, 0.0), std::max(dy, 0.0)) +
+           std::min(std::max(dx, dy), 0.0);
+}
+
+double segmentBoxSignedDistance(math::Vec2 from, math::Vec2 to, const Box2D& box) {
+    if (!segmentIntersectsBox(from, to, box))
+        return std::sqrt(segmentBoxSquared(from, to, box));
+
+    // The signed distance to an axis-aligned box is convex along any
+    // straight segment. Minimize it in one dimension to also measure
+    // intersections where both endpoints are outside the rectangle.
+    // Fixed iteration count keeps deterministic accuracy (~1e-10 in t).
+    const auto diff = to - from;
+    double lo = 0.0, hi = 1.0;
+    constexpr double ratio = 0.6180339887498948482;
+    double a = hi - ratio * (hi - lo);
+    double b = lo + ratio * (hi - lo);
+    double fa = pointBoxSignedDistance(from + diff * a, box);
+    double fb = pointBoxSignedDistance(from + diff * b, box);
+    for (int i = 0; i < 56; ++i) {
+        if (fa < fb) {
+            hi = b;
+            b = a; fb = fa;
+            a = hi - ratio * (hi - lo);
+            fa = pointBoxSignedDistance(from + diff * a, box);
+        } else {
+            lo = a;
+            a = b; fa = fb;
+            b = lo + ratio * (hi - lo);
+            fb = pointBoxSignedDistance(from + diff * b, box);
+        }
+    }
+    return std::min({fa, fb, pointBoxSignedDistance(from, box),
+                     pointBoxSignedDistance(to, box)});
+}
+
 void requireValid(const Obstacle2D& obstacle, double clearance) {
     if (!validObstacle(obstacle) || !std::isfinite(clearance) || clearance < 0.0)
         throw std::invalid_argument("Invalid obstacle geometry or clearance");
@@ -123,6 +163,20 @@ bool segmentHitsObstacle(math::Vec2 from, math::Vec2 to,
     if (!finite(from) || !finite(to))
         throw std::invalid_argument("Invalid arm segment");
     return segmentHitsObstacleUnchecked(from, to, obstacle, clearance);
+}
+
+double segmentSignedDistanceToObstacle(
+    math::Vec2 from, math::Vec2 to, const Obstacle2D& obstacle) {
+    requireValid(obstacle, 0.0);
+    if (!finite(from) || !finite(to))
+        throw std::invalid_argument("Invalid segment distance query");
+    return std::visit([&](const auto& shape) -> double {
+        if constexpr (std::is_same_v<std::decay_t<decltype(shape)>, Circle2D>)
+            return std::sqrt(pointSegmentSquared(shape.center, from, to)) -
+                   shape.radius;
+        else
+            return segmentBoxSignedDistance(from, to, shape);
+    }, obstacle);
 }
 
 bool hasObstacleCollision(std::span<const math::Vec2> positions,

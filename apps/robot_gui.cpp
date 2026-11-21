@@ -1098,6 +1098,11 @@ int main() {
             if (apply) {
                 try {
                     auto next = makeRobot2D(draft, motionSettings);
+                    if (motionSettings.targetObject &&
+                        next.joints.back().length <=
+                        motionSettings.targetObject->toolLength)
+                        throw std::invalid_argument(
+                            "Last link must be longer than tool-contact section");
                     if (geom::hasObstacleCollision(forwardKinematics(next.joints),
                                                    obstacles,
                                                    motionSettings.obstacleClearance))

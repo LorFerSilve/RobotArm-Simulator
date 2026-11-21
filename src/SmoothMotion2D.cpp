@@ -170,6 +170,102 @@ bool targetApproachClear(std::span<const math::Vec2> positions,
     return true;
 }
 
+
+bool validTargetObject2D(const TargetObject2D& object) noexcept {
+    return (object.shape == TargetShape2D::Circle ||
+            object.shape == TargetShape2D::Rectangle) &&
+           std::isfinite(object.radius) && object.radius > 0.0 &&
+           std::isfinite(object.halfWidth) && object.halfWidth > 0.0 &&
+           std::isfinite(object.halfHeight) && object.halfHeight > 0.0 &&
+           std::isfinite(object.clearance) && object.clearance >= 0.0 &&
+           std::isfinite(object.toolLength) && object.toolLength > 0.0;
+}
+
+geometry::Obstacle2D targetBody2D(const TargetObject2D& object,
+                                  math::Vec2 center) {
+    if (!validTargetObject2D(object) || !finite(center))
+        throw std::invalid_argument("Invalid target object geometry");
+    if (object.shape == TargetShape2D::Circle)
+        return geometry::Circle2D{center, object.radius};
+    return geometry::Box2D{center, object.halfWidth, object.halfHeight};
+}
+
+double targetObjectBound2D(const TargetObject2D& object) noexcept {
+    return object.shape == TargetShape2D::Circle ?
+        object.radius + object.clearance :
+        std::hypot(object.halfWidth, object.halfHeight) + object.clearance;
+}
+
+namespace {
+
+void validateObjectContact(std::span<const math::Vec2> positions,
+                           math::Vec2 center, const TargetObject2D& object,
+                           std::size_t depthCount) {
+    if (!validTargetObject2D(object) || positions.size() < 2 ||
+        depthCount != positions.size() - 1 || !finite(center))
+        throw std::invalid_argument("Invalid target object or arm geometry");
+    for (const auto& point : positions)
+        if (!finite(point))
+            throw std::invalid_argument("Invalid arm point");
+    const double lastLinkLength =
+        (positions.back() - positions[positions.size() - 2]).length();
+    if (lastLinkLength <= object.toolLength)
+        throw std::invalid_argument("Tool contact length must be shorter than final link");
+}
+
+double objectDepthAt(std::span<const math::Vec2> positions,
+                     std::size_t index, const geometry::Obstacle2D& body,
+                     const TargetObject2D& object, bool toolNear) {
+    auto end = positions[index + 1];
+    if (toolNear && index + 2 == positions.size()) {
+        const auto shaft = positions[index + 1] - positions[index];
+        const double length = shaft.length();
+        end = positions[index] + shaft * ((length - object.toolLength) / length);
+    }
+    const double signedDistance =
+        geometry::segmentSignedDistanceToObstacle(positions[index], end, body);
+    return std::max(0.0, object.clearance - signedDistance);
+}
+
+} // namespace
+
+void targetLinkPenetrations(std::span<const math::Vec2> positions,
+                            math::Vec2 target, const TargetObject2D& object,
+                            std::span<double> depths) {
+    validateObjectContact(positions, target, object, depths.size());
+    const auto body = targetBody2D(object, target);
+    // Exempt only the explicit tool section AND only when the tool endpoint
+    // is close enough to actually make contact with this object.
+    const bool toolNear =
+        geometry::segmentSignedDistanceToObstacle(
+            positions.back(), positions.back(), body) <=
+            object.toolLength + object.clearance;
+    for (std::size_t i = 0; i < depths.size(); ++i)
+        depths[i] = objectDepthAt(positions, i, body, object, toolNear);
+}
+
+std::vector<double> targetLinkPenetrations(
+    std::span<const math::Vec2> positions, math::Vec2 target,
+    const TargetObject2D& object) {
+    std::vector<double> depths(positions.empty() ? 0 : positions.size() - 1);
+    targetLinkPenetrations(positions, target, object, depths);
+    return depths;
+}
+
+bool targetApproachClear(std::span<const math::Vec2> positions,
+                         math::Vec2 target, const TargetObject2D& object) {
+    validateObjectContact(positions, target, object, positions.size() - 1);
+    const auto body = targetBody2D(object, target);
+    const bool toolNear =
+        geometry::segmentSignedDistanceToObstacle(
+            positions.back(), positions.back(), body) <=
+            object.toolLength + object.clearance;
+    for (std::size_t i = 0; i + 1 < positions.size(); ++i)
+        if (objectDepthAt(positions, i, body, object, toolNear) > 0.0)
+            return false;
+    return true;
+}
+
 bool hasSelfCollision(std::span<const math::Vec2> positions, double clearance) {
     if (!std::isfinite(clearance) || clearance < 0.0)
         throw std::invalid_argument("Self collision clearance must be finite and nonnegative");

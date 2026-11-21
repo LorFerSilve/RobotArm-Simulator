@@ -101,8 +101,10 @@ milestones before generalizing spatial representations.
       validator (also used by follower and spline checks).
 - [x] Regress a narrow obstacle missed by uniform angular sampling and
       a four-link self-contact occurring between safe endpoints.
-- [ ] Replace the current target-as-point / short tool-tip exception
-      with an explicit target-object shape and tool contact geometry.
+- [x] Add an explicit solid target model (circle or axis-aligned
+      rectangle), configurable shaft clearance and physical terminal
+      tool-contact length. Integrate the geometry with planning/follower
+      safety and the SCENE editor. Keep old APIs available for compatibility.
 - [ ] Extend continuous safety certification to target-object approach,
       including the special case of safe retreat from initial contact.
 - [ ] Support custom link radii where needed, with one consistent
@@ -153,9 +155,14 @@ milestones before generalizing spatial representations.
 - [x] **Arms folding unnaturally tightly:** use a larger folding margin
       in the GUI, reject configurations violating that margin, and constrain
       planner paths to the same safe angular region.
-- [ ] **Target-object geometry:** replace the current target-circle/tool-tip
-      approximation with user-configurable object sizes, tool geometry,
-      continuous swept-volume collision checks, and approach direction.
+- [x] **Target-object geometry, first implementation:** circle/rectangle
+      bodies with adjustable size and shaft margin; explicitly sized terminal
+      tool contact section (instead of an implicit proportion of target size).
+- [ ] **Target-object continuous safety:** certify swept approach/contact
+      for the whole target body, including initial-contact retreat. Current
+      target-specific checks still use discretized penetration profiles.
+- [ ] **Approach direction:** define the desired tool-facing orientation
+      when orientation/pose targets are added in 2D-D.
 - [x] **Target-under-arm recovery (initial implementation):** multi-start IK
       can search through virtual configurations without requiring its internal
       iterations to be target-clear; a real planned route may safely retreat

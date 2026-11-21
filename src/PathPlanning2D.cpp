@@ -51,6 +51,26 @@ struct SearchContext {
         return result;
     }
 
+    [[nodiscard]] double targetBound() const noexcept {
+        return settings.targetObject ?
+            targetObjectBound2D(*settings.targetObject) :
+            settings.targetClearance;
+    }
+
+    void targetDepths(std::span<const math::Vec2> points,
+                      std::span<double> depths) const {
+        if (settings.targetObject)
+            targetLinkPenetrations(points, target, *settings.targetObject, depths);
+        else
+            targetLinkPenetrations(points, target, settings.targetClearance, depths);
+    }
+
+    [[nodiscard]] bool targetClear(std::span<const math::Vec2> points) const {
+        return settings.targetObject ?
+            targetApproachClear(points, target, *settings.targetObject) :
+            targetApproachClear(points, target, settings.targetClearance);
+    }
+
     [[nodiscard]] bool validJointAngles(const Angles& q) const {
         if (cancelled() || q.size() != joints.size()) return false;
         for (std::size_t i = 0; i < q.size(); ++i) {
@@ -82,8 +102,7 @@ struct SearchContext {
     [[nodiscard]] bool valid(const Angles& q) const {
         if (!validJointAngles(q)) return false;
         const auto points = positions(q);
-        return collisionFreeRobot(points) &&
-               targetApproachClear(points, target, settings.targetClearance);
+        return collisionFreeRobot(points) && targetClear(points);
     }
 
     // Distance to the entire arm, including its tool, used only to prove
@@ -116,7 +135,7 @@ struct SearchContext {
 
         std::vector<double> previous(joints.size());
         std::vector<double> next(joints.size());
-        targetLinkPenetrations(points, target, settings.targetClearance, previous);
+        targetDepths(points, previous);
 
         double maxDelta = 0.0;
         for (std::size_t i = 0; i < a.size(); ++i)
@@ -137,7 +156,7 @@ struct SearchContext {
             // Bound Cartesian movement of all links between consecutive
             // samples; preserve target clearance and scene-obstacle margins.
             int checks = 1;
-            if (settings.targetClearance > 0.0) {
+            if (targetBound() > 0.0) {
                 double downstream = 0.0;
                 double maximumTravel = 0.0;
                 for (std::size_t i = q.size(); i-- > 0;) {
@@ -145,9 +164,9 @@ struct SearchContext {
                     maximumTravel += downstream * std::abs(to[i] - from[i]);
                 }
                 if (nearestLinkDistance(points) <=
-                    settings.targetClearance + maximumTravel) {
+                    targetBound() + maximumTravel) {
                     const double maxTravelPerCheck =
-                        std::max(0.02, settings.targetClearance * 0.4);
+                        std::max(0.02, targetBound() * 0.4);
                     checks = std::max(1, static_cast<int>(
                         std::ceil(maximumTravel / maxTravelPerCheck)));
                 }
@@ -171,8 +190,7 @@ struct SearchContext {
                 forwardKinematics(joints, q, points);
                 if (!collisionFreeRobot(points)) return false;
 
-                targetLinkPenetrations(
-                    points, target, settings.targetClearance, next);
+                targetDepths(points, next);
                 for (std::size_t i = 0; i < next.size(); ++i)
                     if (next[i] > previous[i] + 1e-9) return false;
                 previous.swap(next);
@@ -317,11 +335,13 @@ double distanceSquared(const Angles& a, const Angles& b) {
 // shoulder winding necessarily crosses the target direction.
 [[nodiscard]] bool shoulderRouteBlocked(
     const SearchContext& c, const Angles& start, const std::vector<Angles>& goals) {
-    if (goals.empty() || c.settings.targetClearance <= 0.0 ||
-        !c.valid(start)) return false;
+    if (goals.empty() || c.targetBound() <= 0.0 || !c.valid(start) ||
+        (c.settings.targetObject &&
+         c.settings.targetObject->shape != TargetShape2D::Circle))
+        return false;
     const double r = c.target.length();
-    if (r <= c.settings.targetClearance ||
-        r > c.joints[0].length + c.settings.targetClearance)
+    if (r <= c.targetBound() ||
+        r > c.joints[0].length + c.targetBound())
         return false;
     const double theta = std::atan2(c.target.y, c.target.x);
     for (const auto& goal : goals) {
@@ -742,6 +762,10 @@ void validate(const SearchContext& c, math::Vec2 target) {
             !std::isfinite(bound.minAngle) || !std::isfinite(bound.maxAngle) ||
             bound.minAngle >= bound.maxAngle) throw std::invalid_argument("Invalid robot geometry or limits");
     }
+    if (c.settings.targetObject &&
+        (!validTargetObject2D(*c.settings.targetObject) ||
+         c.settings.targetObject->toolLength >= c.joints.back().length))
+        throw std::invalid_argument("Invalid target object or tool contact length");
     if (!c.validRobot(c.angles())) throw std::invalid_argument("Cannot plan from an invalid starting pose");
 }
 
@@ -780,8 +804,14 @@ PlannedJointPath2D planJointPath2D(std::span<const Joint2D> joints,
     }
     // The base is fixed at the origin; a target containing the base can
     // never be cleared by the first link, regardless of reconfiguration.
-    if (settings.targetClearance > 0.0 &&
-        target.length() < settings.targetClearance) {
+    const bool targetCoversBase = settings.targetObject ?
+        geometry::segmentSignedDistanceToObstacle(
+            {0.0, 0.0}, {0.0, 0.0},
+            targetBody2D(*settings.targetObject, target)) <
+            settings.targetObject->clearance :
+        (settings.targetClearance > 0.0 &&
+         target.length() < settings.targetClearance);
+    if (targetCoversBase) {
         output.failure = PlanningFailure2D::GoalInObstacle;
         return output;
     }
