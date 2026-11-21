@@ -64,6 +64,19 @@ int main() {
         require((path.endEffectorTrace.back() - target).length() <=
                 settings.positionTolerance,
                 "Preview must terminate at the IK target");
+        require(path.jointTraces.size() == robot.size(),
+                "Planner must provide one trace for each movable joint");
+        for (std::size_t joint = 0; joint < path.jointTraces.size(); ++joint) {
+            require(path.jointTraces[joint].size() == path.endEffectorTrace.size(),
+                    "Joint traces must use exactly the same sampling as the tip");
+            require((path.jointTraces[joint].front() -
+                     forwardKinematics(robot)[joint + 1]).length() < 1e-8,
+                    "Joint trace must start at the actual joint position");
+        }
+        for (std::size_t i = 0; i < path.endEffectorTrace.size(); ++i)
+            require((path.jointTraces.back()[i] -
+                     path.endEffectorTrace[i]).length() < 1e-10,
+                    "Final joint trace must coincide with end-effector preview");
 
         // If the drawing were merely a straight Cartesian line it would miss
         // the loop made by the long-way shoulder rotation.
@@ -79,6 +92,9 @@ int main() {
         require(follower.endEffectorTrace().size() ==
                 path.endEffectorTrace.size(),
                 "Installing a plan must retain its exact preview");
+        require(follower.jointTraces().size() == robot.size() &&
+                follower.finalJointAngles().size() == robot.size(),
+                "Follower must retain the joint paths and final pose");
         bool arrived = false;
         for (int frame = 0; frame < 2200; ++frame) {
             const auto state = follower.advance(robot, limits, 1.0 / 60.0, settings);
@@ -93,6 +109,9 @@ int main() {
         follower.reset();
         require(follower.endEffectorTrace().empty(),
                 "Reset must remove the old trajectory silhouette");
+        require(follower.jointTraces().empty() &&
+                follower.finalJointAngles().empty(),
+                "Reset must remove joint traces and predicted final pose");
         require(!follower.pathAvailable(), "Reset must also invalidate the path");
 
         const auto impossible = planJointPath2D(robot, limits, {50.0, 50.0},

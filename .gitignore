@@ -20,3 +20,6 @@ CMakeUserPresets.json
 
 # Out-of-source CMake builds
 /build/
+
+# Local diagnostic capture (exported by the GUI)
+robotarm-session.rarm

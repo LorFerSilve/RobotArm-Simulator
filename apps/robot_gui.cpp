@@ -4,6 +4,7 @@
 #include "robotics/kinematics/AsyncPlanner2D.hpp"
 #include "robotics/kinematics/RobotConfiguration2D.hpp"
 #include "robotics/kinematics/Jacobian2D.hpp"
+#include "robotics/diagnostics/Telemetry2D.hpp"
 #include "robotics/geometry/Obstacles2D.hpp"
 
 #include <raylib.h>
@@ -18,6 +19,7 @@
 #include <span>
 #include <type_traits>
 #include <variant>
+#include <limits>
 
 namespace {
 
@@ -49,6 +51,7 @@ using robotics::kinematics::makeRobot2D;
 
 constexpr double degToRad = std::numbers::pi / 180.0;
 constexpr std::size_t maxGuiJoints = 6;
+constexpr const char* sessionFile = "robotarm-session.rarm";
 
 JointDefinition2D makeNewLink(bool positiveBranch) {
     const double margin = 0.16;
@@ -182,6 +185,54 @@ void drawEndEffectorTrace(const Viewport& view, std::span<const Vec2> trace) {
         DrawCircleV(view.toScreen(trace[index]), 3.2F, markerColor);
     }
     DrawText("PLANNED TIP PATH", 20, headerHeight + 15, 13, markerColor);
+}
+
+// Analyze overlay: visualize the model's link clearance and future pose.
+// These are graphical estimates, NOT certified continuous collision checks.
+void drawCollisionEnvelope(const Viewport& view, std::span<const Vec2> positions,
+                           Vec2 target, double linkRadius, double targetRadius) {
+    const Color envelope{248, 181, 88, 48};
+    const float thickness = std::max(2.0F,
+        static_cast<float>(2.0 * linkRadius) * view.pixelsPerMetre);
+    const float radius = thickness * 0.5F;
+    for (std::size_t i = 1; i < positions.size(); ++i) {
+        const auto a = view.toScreen(positions[i-1]);
+        const auto b = view.toScreen(positions[i]);
+        DrawLineEx(a, b, thickness, envelope);
+        DrawCircleV(a, radius, envelope);
+        DrawCircleV(b, radius, envelope);
+    }
+    const auto pt = view.toScreen(target);
+    const float targetPixels =
+        static_cast<float>(targetRadius) * view.pixelsPerMetre;
+    DrawCircleV(pt, targetPixels, Color{246, 120, 122, 38});
+    DrawCircleLines(static_cast<int>(pt.x), static_cast<int>(pt.y),
+                    targetPixels, Color{246, 120, 122, 138});
+}
+
+void drawJointTraces(const Viewport& view,
+                     const std::vector<std::vector<Vec2>>& jointTraces,
+                     std::span<const Joint2D> robot,
+                     std::span<const double> goalAngles) {
+    const Color traceColors[] = {
+        Color{80, 167, 245, 70}, Color{248, 181, 88, 70},
+        Color{80, 217, 166, 70}
+    };
+    for (std::size_t joint = 0; joint + 1 < jointTraces.size(); ++joint) {
+        const auto& points = jointTraces[joint];
+        for (std::size_t i = 1; i < points.size(); ++i)
+            DrawLineEx(view.toScreen(points[i - 1]),
+                       view.toScreen(points[i]), 1.5F,
+                       traceColors[joint % 3]);
+    }
+    if (goalAngles.size() != robot.size()) return;
+    auto terminal = std::vector<Joint2D>(robot.begin(), robot.end());
+    for (std::size_t i = 0; i < terminal.size(); ++i)
+        terminal[i].angle = goalAngles[i];
+    const auto points = robotics::kinematics::forwardKinematics(terminal);
+    for (std::size_t i = 1; i < points.size(); ++i)
+        DrawLineEx(view.toScreen(points[i - 1]), view.toScreen(points[i]),
+                   4.0F, Color{80, 217, 166, 82});
 }
 
 bool button(int x, int y, int w, int h, const char* label,
@@ -430,6 +481,211 @@ void drawConfigurator(int x, int height, std::vector<JointDefinition2D>& draft,
     }
 }
 
+
+using robotics::diagnostics::TelemetryRecorder2D;
+using robotics::diagnostics::TelemetryFrame2D;
+using robotics::diagnostics::PlannerState2D;
+
+enum class PlotMetric { Angle, Speed, Acceleration, Error, Condition, Planner };
+
+const char* plotLabel(PlotMetric metric) {
+    switch (metric) {
+    case PlotMetric::Angle: return "Joint angle (deg)";
+    case PlotMetric::Speed: return "Joint speed (deg/s)";
+    case PlotMetric::Acceleration: return "Joint accel (deg/s^2)";
+    case PlotMetric::Error: return "Cartesian error (m)";
+    case PlotMetric::Condition: return "Jacobian condition (2-norm)";
+    case PlotMetric::Planner: return "Planner state";
+    }
+    return "";
+}
+
+double plotValue(const TelemetryFrame2D& frame, PlotMetric metric,
+                 std::size_t jointIndex) {
+    switch (metric) {
+    case PlotMetric::Angle:
+        return jointIndex < frame.joints.size() ?
+            frame.joints[jointIndex].angle * radToDeg :
+            std::numeric_limits<double>::quiet_NaN();
+    case PlotMetric::Speed:
+        return jointIndex < frame.joints.size() ?
+            frame.joints[jointIndex].angularVelocity * radToDeg :
+            std::numeric_limits<double>::quiet_NaN();
+    case PlotMetric::Acceleration:
+        return jointIndex < frame.angularAccelerations.size() ?
+            frame.angularAccelerations[jointIndex] * radToDeg :
+            std::numeric_limits<double>::quiet_NaN();
+    case PlotMetric::Error: return frame.cartesianError;
+    case PlotMetric::Condition: return frame.jacobianCondition;
+    case PlotMetric::Planner:
+        return static_cast<double>(frame.plannerState);
+    }
+    return 0.0;
+}
+
+void drawTelemetryGraph(int x, int y, int w, int h,
+                        const TelemetryRecorder2D& recorder,
+                        PlotMetric metric, std::size_t jointIndex,
+                        bool replayActive, std::size_t replayIndex) {
+    const Rectangle rect{static_cast<float>(x), static_cast<float>(y),
+                         static_cast<float>(w), static_cast<float>(h)};
+    DrawRectangleRec(rect, Color{18, 27, 42, 255});
+    DrawRectangleLinesEx(rect, 1.0F, gridColor);
+    if (recorder.empty()) {
+        DrawText("NO RECORDED FRAMES", x + 28, y + h/2, 14, muted);
+        return;
+    }
+    const auto& frames = recorder.frames();
+    const double firstTime = frames.front().time;
+    const double totalTime = std::max(0.001, frames.back().time - firstTime);
+    double lowest = std::numeric_limits<double>::infinity();
+    double highest = -std::numeric_limits<double>::infinity();
+    for (const auto& frame : frames) {
+        const double value = plotValue(frame, metric, jointIndex);
+        if (!std::isfinite(value)) continue;
+        lowest = std::min(lowest, value);
+        highest = std::max(highest, value);
+    }
+    if (!std::isfinite(lowest)) {
+        DrawText("SINGULAR / UNAVAILABLE", x + 30, y + h/2, 14, orange);
+        return;
+    }
+    if (metric == PlotMetric::Planner) { lowest = 0.0; highest = 6.0; }
+    else if (highest - lowest < 1e-8) {
+        lowest -= 1.0;
+        highest += 1.0;
+    } else {
+        const double margin = (highest - lowest) * 0.1;
+        lowest -= margin;
+        highest += margin;
+    }
+
+    for (int i = 1; i < 4; ++i) {
+        const int lineY = y + i * h / 4;
+        DrawLine(x + 1, lineY, x + w - 1, lineY, gridColor);
+    }
+
+    bool hasPrevious = false;
+    Vector2 previous{};
+    for (const auto& frame : frames) {
+        const double value = plotValue(frame, metric, jointIndex);
+        if (!std::isfinite(value)) { hasPrevious = false; continue; }
+        const float xx = static_cast<float>(x + 1 +
+            (frame.time - firstTime) / totalTime * (w - 2));
+        const float yy = static_cast<float>(y + h - 1 -
+            (value - lowest) / (highest - lowest) * (h - 2));
+        const Vector2 here{xx, yy};
+        if (hasPrevious) DrawLineEx(previous, here, 2.0F, blue);
+        previous = here;
+        hasPrevious = true;
+    }
+    if (replayActive && replayIndex < recorder.size()) {
+        const double time = recorder.at(replayIndex).time;
+        const float markerX = static_cast<float>(x + 1 +
+            (time - firstTime) / totalTime * (w - 2));
+        DrawLineEx({markerX, static_cast<float>(y)},
+                   {markerX, static_cast<float>(y + h)}, 1.5F, orange);
+    }
+    DrawText(TextFormat("max %.2f", highest), x + 6, y + 5, 12, muted);
+    DrawText(TextFormat("min %.2f", lowest), x + 6, y + h - 19, 12, muted);
+}
+
+// GUI-only diagnostics. The recorder and file format are implemented in the
+// core library; the view does not change physics, collisions or planning.
+void drawAnalysisPanel(int panelX, int height, TelemetryRecorder2D& recorder,
+                       std::size_t& selectedJoint, PlotMetric& metric,
+                       bool& replayActive, bool& replayPlaying,
+                       std::size_t& replayIndex, std::string& feedback,
+                       Vector2 mouse, bool click) {
+    const int left = panelX + 18;
+    int y = headerHeight + 83;
+    DrawText("DIAGNOSTICS / REPLAY", left, y, 18, light);
+    y += 36;
+
+    const std::size_t jointCount = recorder.empty() ? 0 :
+        recorder.frames().back().joints.size();
+    if (button(left, y, 36, 29, "<", mouse, click,
+               selectedJoint > 0)) --selectedJoint;
+    DrawText(TextFormat("Joint %i of %i", static_cast<int>(selectedJoint + 1),
+                        static_cast<int>(jointCount)),
+             left + 55, y + 7, 15, muted);
+    if (button(left + 266, y, 36, 29, ">", mouse, click,
+               selectedJoint + 1 < jointCount)) ++selectedJoint;
+    y += 41;
+
+    const std::array<const char*, 6> names{
+        "ANGLE", "SPEED", "ACCEL", "ERROR", "JACOBIAN", "PLANNER"};
+    for (std::size_t i = 0; i < names.size(); ++i) {
+        const int bx = left + static_cast<int>(i % 3) * 105;
+        const int by = y + static_cast<int>(i / 3) * 37;
+        if (button(bx, by, 96, 30, names[i], mouse, click))
+            metric = static_cast<PlotMetric>(i);
+    }
+    y += 85;
+    DrawText(plotLabel(metric), left, y, 15, light);
+    y += 25;
+    const int graphHeight = std::clamp(height - 595, 112, 184);
+    drawTelemetryGraph(left, y, 306, graphHeight,
+                       recorder, metric, selectedJoint,
+                       replayActive, replayIndex);
+    y += graphHeight + 14;
+    if (!recorder.empty()) {
+        const auto& current = replayActive && replayIndex < recorder.size() ?
+            recorder.at(replayIndex) : recorder.frames().back();
+        const double value = plotValue(current, metric, selectedJoint);
+        if (std::isfinite(value))
+            DrawText(TextFormat("Value: %.3f", value), left, y, 15, light);
+        else
+            DrawText("Value: SINGULAR", left, y, 15, orange);
+        y += 25;
+        DrawText(TextFormat("%i frames | %.2f s | %s",
+                static_cast<int>(recorder.size()), current.time,
+                robotics::diagnostics::plannerStateName(current.plannerState)),
+                 left, y, 13, muted);
+    }
+    y += 38;
+    if (button(left, y, 147, 32, "SAVE SESSION", mouse, click,
+               !recorder.empty())) {
+        try {
+            recorder.save(sessionFile);
+            feedback = "Saved robotarm-session.rarm";
+        } catch (const std::exception& e) { feedback = e.what(); }
+    }
+    if (button(left + 159, y, 147, 32, "LOAD SESSION", mouse, click)) {
+        try {
+            recorder.load(sessionFile);
+            selectedJoint = 0;
+            replayIndex = 0;
+            replayActive = !recorder.empty();
+            replayPlaying = false;
+            feedback = "Loaded robotarm-session.rarm";
+        } catch (const std::exception& e) { feedback = e.what(); }
+    }
+    y += 42;
+    if (button(left, y, 95, 32,
+               replayActive ? "EXIT" : "REPLAY",
+               mouse, click, !recorder.empty())) {
+        replayActive = !replayActive;
+        replayPlaying = false;
+        replayIndex = 0;
+    }
+    if (button(left + 106, y, 95, 32,
+               replayPlaying ? "PAUSE" : "PLAY",
+               mouse, click, replayActive)) replayPlaying = !replayPlaying;
+    if (button(left + 212, y, 95, 32, "NEXT >",
+               mouse, click, replayActive &&
+               replayIndex + 1 < recorder.size())) {
+        ++replayIndex;
+        replayPlaying = false;
+    }
+    y += 43;
+    if (!feedback.empty())
+        DrawText(feedback.substr(0, 40).c_str(), left, y, 12, muted);
+    y += 20;
+    DrawText("Replays recorded states, not a new IK plan.",
+             left, y, 12, muted);
+}
+
 void drawSidebar(int screenWidth, int height, const std::vector<Joint2D>& joints,
                  Vec2 target, Vec2 endEffector, Vec2 tipVelocity,
                  double error, double elapsed, bool paused,
@@ -526,7 +782,15 @@ int main() {
     Robot2D robot = makeRobot2D(appliedDefinition, motionSettings);
     auto& joints = robot.joints;
     std::size_t selectedJoint = 0;
-    int activeTab = 0; // 0 telemetry, 1 robot configuration, 2 obstacles
+    int activeTab = 0; // 0 telemetry, 1 configuration, 2 obstacles, 3 analysis
+    TelemetryRecorder2D recorder;
+    PlotMetric plotMetric = PlotMetric::Angle;
+    std::size_t analysisJoint = 0;
+    bool replayActive = false;
+    bool replayPlaying = false;
+    std::size_t replayIndex = 0;
+    double replayAccumulator = 0.0;
+    std::string analysisFeedback;
     std::string feedback;
     std::string obstacleFeedback;
     std::vector<Obstacle2D> obstacles;
@@ -544,6 +808,7 @@ int main() {
     std::string planningError;
     bool pendingPlan = true;
     bool draggingTarget = false;
+    recorder.record(0.0, joints, target, PlannerState2D::Idle, obstacles);
 
     auto sceneChanged = [&] {
         // A new or moved obstacle invalidates every previous path.
@@ -571,7 +836,8 @@ int main() {
         const bool selectThree = IsKeyPressed(KEY_THREE);
         const bool selectFour = IsKeyPressed(KEY_FOUR);
         const bool selectFive = IsKeyPressed(KEY_FIVE);
-        if (reset || selectTwo || selectThree || selectFour || selectFive) {
+        if (!replayActive && (reset || selectTwo || selectThree ||
+                              selectFour || selectFive)) {
             const bool changePreset = selectTwo || selectThree || selectFour || selectFive;
             const int nextCount = changePreset ?
                 (selectFive ? 5 : selectFour ? 4 : selectThree ? 3 : 2) : jointCount;
@@ -601,6 +867,10 @@ int main() {
                 pendingPlan = true;
                 planningError.clear();
                 draggingTarget = false;
+                recorder.clear();
+                recorder.record(0.0, joints, target,
+                                PlannerState2D::Idle, obstacles);
+                analysisJoint = 0;
             }
         }
 
@@ -618,13 +888,15 @@ int main() {
             zoom = std::clamp(zoom + GetMouseWheelMove() * 0.12F, 0.55F, 2.5F);
         }
         const auto viewport = makeViewport(canvasWidth, height, reach, zoom);
-        if (IsKeyPressed(KEY_T)) canvasTool = CanvasTool::Target;
-        if (IsKeyPressed(KEY_C)) { canvasTool = CanvasTool::PlaceCircle; activeTab = 2; }
-        if (IsKeyPressed(KEY_B)) { canvasTool = CanvasTool::PlaceBox; activeTab = 2; }
-        if (IsKeyPressed(KEY_V)) { canvasTool = CanvasTool::MoveObstacle; activeTab = 2; }
+        if (!replayActive) {
+            if (IsKeyPressed(KEY_T)) canvasTool = CanvasTool::Target;
+            if (IsKeyPressed(KEY_C)) { canvasTool = CanvasTool::PlaceCircle; activeTab = 2; }
+            if (IsKeyPressed(KEY_B)) { canvasTool = CanvasTool::PlaceBox; activeTab = 2; }
+            if (IsKeyPressed(KEY_V)) { canvasTool = CanvasTool::MoveObstacle; activeTab = 2; }
+        }
 
         bool obstacleEdited = false;
-        if (IsKeyPressed(KEY_DELETE) && selectedObstacle >= 0 &&
+        if (!replayActive && IsKeyPressed(KEY_DELETE) && selectedObstacle >= 0 &&
             static_cast<std::size_t>(selectedObstacle) < obstacles.size()) {
             obstacles.erase(obstacles.begin() + selectedObstacle);
             selectedObstacle = -1;
@@ -633,7 +905,7 @@ int main() {
             obstacleFeedback = "Obstacle removed.";
         }
         const Vec2 worldMouse = viewport.toWorld(mouse);
-        if (mouseInCanvas && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
+        if (!replayActive && mouseInCanvas && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
             if (canvasTool == CanvasTool::PlaceCircle ||
                 canvasTool == CanvasTool::PlaceBox) {
                 if (obstacles.size() >= 16) {
@@ -663,7 +935,7 @@ int main() {
                 draggingObstacle = selectedObstacle >= 0;
             }
         }
-        if (draggingObstacle && mouseInCanvas &&
+        if (!replayActive && draggingObstacle && mouseInCanvas &&
             IsMouseButtonDown(MOUSE_BUTTON_LEFT) &&
             selectedObstacle >= 0 &&
             static_cast<std::size_t>(selectedObstacle) < obstacles.size()) {
@@ -678,7 +950,7 @@ int main() {
         }
         if (IsMouseButtonReleased(MOUSE_BUTTON_LEFT)) draggingObstacle = false;
 
-        if (canvasTool == CanvasTool::Target && mouseInCanvas &&
+        if (!replayActive && canvasTool == CanvasTool::Target && mouseInCanvas &&
             IsMouseButtonDown(MOUSE_BUTTON_LEFT)) {
             if (!draggingTarget) {
                 asyncPlanner.cancel();
@@ -695,7 +967,7 @@ int main() {
         }
         if (obstacleEdited) sceneChanged();
 
-        if (!paused) {
+        if (!paused && !replayActive) {
             // Plan a safe joint-space route once the target is committed.
             // Retain immediate analytic motion while dragging a 2-link arm.
             accumulator += std::min(static_cast<double>(GetFrameTime()), 0.1);
@@ -726,14 +998,40 @@ int main() {
                         motionState = {};
                 }
                 simulatedTime += fixedDt;
+                const PlannerState2D state = asyncPlanner.busy() ?
+                    PlannerState2D::Planning :
+                    !planningError.empty() || plannedMotion.searchFailed() ?
+                    PlannerState2D::NoPath :
+                    motionState.reached ? PlannerState2D::Reached :
+                    motionState.blocked ? PlannerState2D::Blocked :
+                    plannedMotion.pathAvailable() ? PlannerState2D::Moving :
+                    PlannerState2D::Idle;
+                recorder.record(simulatedTime, joints, target, state, obstacles);
                 accumulator -= fixedDt;
             }
         }
 
-        const auto positions = forwardKinematics(joints);
+        if (replayActive && replayPlaying && replayIndex + 1 < recorder.size()) {
+            replayAccumulator += std::min(static_cast<double>(GetFrameTime()), 0.1);
+            while (replayIndex + 1 < recorder.size()) {
+                const double delay = recorder.at(replayIndex + 1).time -
+                                     recorder.at(replayIndex).time;
+                if (replayAccumulator < delay) break;
+                replayAccumulator -= delay;
+                ++replayIndex;
+            }
+            if (replayIndex + 1 >= recorder.size()) replayPlaying = false;
+        }
+        const TelemetryFrame2D* playback =
+            replayActive && replayIndex < recorder.size() ?
+                &recorder.at(replayIndex) : nullptr;
+        const auto& displayJoints = playback ? playback->joints : joints;
+        const auto& displayObstacles = playback ? playback->obstacles : obstacles;
+        const Vec2 displayTarget = playback ? playback->target : target;
+        const auto positions = forwardKinematics(displayJoints);
         const auto jacobian = endEffectorJacobian(positions);
-        const auto velocity = endEffectorVelocity(jacobian, joints);
-        const double error = (target - positions.back()).length();
+        const auto velocity = endEffectorVelocity(jacobian, displayJoints);
+        const double error = (displayTarget - positions.back()).length();
         const bool reached = !draggingTarget && motionState.reached &&
                              error <= motionSettings.positionTolerance;
         const bool stalled = !reached && motionState.blocked;
@@ -755,11 +1053,19 @@ int main() {
         DrawRectangle(0, headerHeight, canvasWidth, height - headerHeight, canvasColor);
         drawGrid(viewport, canvasWidth, height);
         BeginScissorMode(0, headerHeight, canvasWidth, height - headerHeight);
-        drawScene(viewport, obstacles, selectedObstacle);
-        if (!draggingTarget && !reached && !planning &&
+        drawScene(viewport, displayObstacles,
+                  replayActive ? -1 : selectedObstacle);
+        if (activeTab == 3)
+            drawCollisionEnvelope(viewport, positions, displayTarget,
+                                  motionSettings.obstacleClearance,
+                                  motionSettings.targetClearance);
+        if (activeTab == 3 && !replayActive && plannedMotion.pathAvailable())
+            drawJointTraces(viewport, plannedMotion.jointTraces(),
+                            displayJoints, plannedMotion.finalJointAngles());
+        if (!replayActive && !draggingTarget && !reached && !planning &&
             plannedMotion.pathAvailable())
             drawEndEffectorTrace(viewport, plannedMotion.endEffectorTrace());
-        drawArm(viewport, positions, target,
+        drawArm(viewport, positions, displayTarget,
                 !unreachable && !(plannedMotion.searchFailed() || !planningError.empty()));
         EndScissorMode();
         DrawText("T Target   C Circle   B Box   V Move   DEL Remove   SPACE Pause   2-5 Presets",
@@ -772,13 +1078,15 @@ int main() {
                       height - headerHeight, sidebarColor);
         const bool click = IsMouseButtonPressed(MOUSE_BUTTON_LEFT);
         const Vector2 cursor = GetMousePosition();
-        if (button(panelX + 14, headerHeight + 14, 100, 35, "TELEMETRY",
+        if (button(panelX + 12, headerHeight + 14, 77, 35, "TELEM",
                    cursor, click)) activeTab = 0;
-        if (button(panelX + 125, headerHeight + 14, 100, 35, "CONFIGURE",
+        if (button(panelX + 94, headerHeight + 14, 77, 35, "CONFIG",
                    cursor, click)) activeTab = 1;
-        if (button(panelX + 236, headerHeight + 14, 100, 35, "OBSTACLES",
+        if (button(panelX + 176, headerHeight + 14, 77, 35, "SCENE",
                    cursor, click)) activeTab = 2;
-        if (activeTab == 1) {
+        if (button(panelX + 258, headerHeight + 14, 77, 35, "ANALYZE",
+                   cursor, click)) activeTab = 3;
+        if (activeTab == 1 && !replayActive) {
             bool apply = false;
             drawConfigurator(panelX, height, draft, selectedJoint,
                              apply, feedback, cursor, click);
@@ -802,20 +1110,47 @@ int main() {
                     planningError.clear();
                     pendingPlan = true;
                     draggingTarget = false;
+                    recorder.clear();
+                    recorder.record(0.0, joints, target,
+                                    PlannerState2D::Idle, obstacles);
+                    analysisJoint = 0;
                     feedback = "Applied. SPACE to move.";
                 } catch (const std::invalid_argument& ex) {
                     feedback = std::string("Error: ") + ex.what();
                 }
             }
-        } else if (activeTab == 2) {
+        } else if (activeTab == 2 && !replayActive) {
             const bool changed = drawObstaclePanel(
                 panelX, height, canvasTool, obstacles, selectedObstacle,
                 obstacleFeedback, positions, motionSettings.obstacleClearance,
                 cursor, click);
             if (changed) sceneChanged();
+        } else if (activeTab == 3) {
+            const bool wasReplaying = replayActive;
+            drawAnalysisPanel(panelX, height, recorder, analysisJoint, plotMetric,
+                              replayActive, replayPlaying, replayIndex,
+                              analysisFeedback, cursor, click);
+            if (wasReplaying != replayActive) {
+                // Replaying is read-only; entering/leaving invalidates the
+                // old live path. On exit start a new time series, avoiding
+                // timestamp collisions with an imported recording.
+                if (wasReplaying && !replayActive) {
+                    recorder.clear();
+                    recorder.record(simulatedTime, joints, target,
+                                    PlannerState2D::Paused, obstacles);
+                }
+                paused = true;
+                accumulator = 0.0;
+                replayAccumulator = 0.0;
+                asyncPlanner.cancel();
+                plannedMotion.reset();
+                pendingPlan = true;
+                for (auto& joint : joints) joint.angularVelocity = 0.0;
+            }
         } else {
-            drawSidebar(width, height, joints, target, positions.back(), velocity,
-                        error, simulatedTime, paused, reached, stalled,
+            drawSidebar(width, height, displayJoints, displayTarget, positions.back(), velocity,
+                        error, playback ? playback->time : simulatedTime,
+                        paused || replayActive, reached, stalled,
                         motionState.constrained, unreachable,
                         plannedMotion.searchFailed() || !planningError.empty(),
                         planning,

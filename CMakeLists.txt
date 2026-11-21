@@ -19,6 +19,7 @@ add_library(robotics_core STATIC
     src/RobotConfiguration2D.cpp
     src/Obstacles2D.cpp
     src/AsyncPlanner2D.cpp
+    src/Telemetry2D.cpp
 )
 
 find_package(Threads REQUIRED)
@@ -141,3 +142,8 @@ add_test(NAME CartesianTipOptimization COMMAND test_cartesian_optimization)
 add_executable(test_obstacle_tip_optimization tests/test_obstacle_tip_optimization.cpp)
 target_link_libraries(test_obstacle_tip_optimization PRIVATE robotics_core)
 add_test(NAME ObstacleTipOptimization COMMAND test_obstacle_tip_optimization)
+
+# Phase 4 diagnostics, planner-state history, and reproducible file replay.
+add_executable(test_telemetry tests/test_telemetry.cpp)
+target_link_libraries(test_telemetry PRIVATE robotics_core)
+add_test(NAME Telemetry2D COMMAND test_telemetry)

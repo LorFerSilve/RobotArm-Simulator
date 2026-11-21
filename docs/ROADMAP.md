@@ -72,12 +72,19 @@ completeness and real-time replanning are not yet guaranteed.
 
 ### Phase 4 — Diagnostics and analysis
 
-- [ ] Graph angle, speed, acceleration, Cartesian error, Jacobian condition
-      and planner state over time.
+- [x] Graph angle, speed, acceleration, Cartesian error, Jacobian condition
+      and planner state over time in the ANALYZE tab. The history is bounded
+      to the most recent 3,600 simulation frames (~60 s at 60 Hz).
 - [x] Display a sampled end-effector path silhouette from the actual
       planned spline or collision-checked joint-space polyline.
-- [ ] Visualize other joint paths, candidate end poses, and collision envelopes.
-- [ ] Allow reproducible recording/replay of configurations and scenarios.
+- [x] Visualize other joint paths, the predicted final pose, and approximate
+      link/target collision envelopes. These overlays are diagnostic only,
+      not mathematically certified continuous collision detection.
+- [x] Support reproducible recording/replay of joint positions, velocities,
+      target and static obstacle scene with a versioned text file. The viewer
+      replays stored frames and never recomputes a planner solution.
+- [ ] Consider optional full-session/unbounded capture for long experiments
+      if the current rolling 60-second recording proves insufficient.
 
 ### Phase 5 — 3D robot kinematics
 

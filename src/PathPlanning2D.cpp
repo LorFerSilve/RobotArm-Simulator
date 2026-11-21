@@ -653,8 +653,12 @@ int extend(std::vector<Node>& tree, const Angles& target, const SearchContext& c
     const SearchContext& c, PlannedJointPath2D plan) {
     if (!plan.found()) return plan;
 
+    plan.jointTraces.resize(c.joints.size());
     if (plan.waypoints.size() == 1) {
-        plan.endEffectorTrace.push_back(c.positions(plan.waypoints.front()).back());
+        const auto positions = c.positions(plan.waypoints.front());
+        for (std::size_t i = 0; i < c.joints.size(); ++i)
+            plan.jointTraces[i].push_back(positions[i + 1]);
+        plan.endEffectorTrace.push_back(positions.back());
         return plan;
     }
 
@@ -681,6 +685,7 @@ int extend(std::vector<Node>& tree, const Angles& target, const SearchContext& c
             if (c.cancelled()) {
                 plan.waypoints.clear();
                 plan.endEffectorTrace.clear();
+                plan.jointTraces.clear();
                 plan.failure = PlanningFailure2D::Cancelled;
                 return plan;
             }
@@ -694,7 +699,10 @@ int extend(std::vector<Node>& tree, const Angles& target, const SearchContext& c
             }
             for (std::size_t j = 0; j < robot.size(); ++j)
                 robot[j].angle = angles[j];
-            plan.endEffectorTrace.push_back(forwardKinematics(robot).back());
+            const auto positions = forwardKinematics(robot);
+            for (std::size_t j = 0; j < robot.size(); ++j)
+                plan.jointTraces[j].push_back(positions[j + 1]);
+            plan.endEffectorTrace.push_back(positions.back());
         }
     }
     for (std::size_t i = 1; i < plan.endEffectorTrace.size(); ++i)
@@ -972,6 +980,7 @@ const char* planningFailureMessage(PlanningFailure2D reason) noexcept {
 void PlannedMotion2D::reset() noexcept {
     path_.clear();
     endEffectorTrace_.clear();
+    jointTraces_.clear();
     endEffectorDistance_ = 0.0;
     index_ = 0;
     segmentElapsed_ = 0.0;
@@ -992,6 +1001,7 @@ void PlannedMotion2D::usePlan(PlannedJointPath2D plan, math::Vec2 target) {
     failure_ = plan.failure;
     path_ = std::move(plan.waypoints);
     endEffectorTrace_ = std::move(plan.endEffectorTrace);
+    jointTraces_ = std::move(plan.jointTraces);
     endEffectorDistance_ = plan.endEffectorDistance;
     splineTangents_ = std::move(plan.splineTangents);
     pathDistances_ = std::move(plan.pathDistances);

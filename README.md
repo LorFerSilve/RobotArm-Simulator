@@ -497,3 +497,47 @@ remain active, with new cross-check tests against the original geometry
 APIs. **No percentage speedup is claimed without a controlled benchmark.**
 The audit includes the next measurements and architecture refactors that
 would be justified by actual usage.
+
+## Phase 4 — Diagnostics, visual analysis and replay
+
+The **ANALYZE** tab shows a rolling graph of up to 3,600 simulation
+samples (approximately 60 seconds at 60 Hz). The six graph choices are:
+joint angle, angular velocity, angular acceleration, Cartesian
+end-effector error, Jacobian spectral condition number, and planner
+state. Select a joint with the previous/next arrows. Angular values
+are displayed in degrees (per second, per second squared). The
+condition number works for a **2 x N** Jacobian, not just two joints;
+infinite values correctly indicate a rank-deficient/singular pose.
+
+In the canvas, the ANALYZE tab also draws faint paths for intermediate
+joints, a preview of the planned final robot configuration, and a
+translucent indication of the robot/link and target collision margins.
+These are visualization aids and **not certified swept-volume safety**.
+
+### Recording and playback
+
+The engine stores time, all link lengths and joint angles/velocities,
+Cartesian target, scene obstacles and planner state for each sample.
+Error, accelerations and Jacobian condition are derived from the recorded
+geometry. The diagnostic record has a bounded capacity of 3,600 frames
+in order to avoid unbounded GUI memory usage.
+
+Use **SAVE SESSION** to export the current rolling history to
+`robotarm-session.rarm` in the program's working directory. Use
+**LOAD SESSION** to load a previously saved recording, then **REPLAY**,
+**PLAY / PAUSE** and **NEXT** to inspect individual recorded states.
+Press **EXIT** to leave replay mode; returning to the live simulator
+remains paused and requires **Space** to plan and resume. Replay never
+executes IK/RRT or changes live robot geometry.
+
+The `.rarm` file is a versioned, dependency-free text format. Only
+complete, validated recordings are installed; malformed data will not
+replace the previous session. The file is excluded from Git via
+`.gitignore`.
+
+Phase 4 is covered by `Telemetry2D` CTest, including singularity
+detection, derived acceleration, bounded history, file round-trips,
+obstacle preservation and malformed-file rejection. The existing
+`TrajectoryPreview2D` test additionally checks intermediate joint
+traces and predicted final joint angles. The full release motion suite
+remains part of CI.

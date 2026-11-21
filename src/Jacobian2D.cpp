@@ -1,6 +1,7 @@
 #include "robotics/kinematics/Jacobian2D.hpp"
 
 #include <cmath>
+#include <limits>
 #include <stdexcept>
 
 namespace robotics::kinematics {
@@ -83,6 +84,30 @@ double jacobianDeterminant2D(
         throw std::overflow_error("Jacobian determinant overflow");
     }
     return determinant;
+}
+
+double jacobianConditionNumber2D(
+    std::span<const math::Vec2> jacobianColumns) {
+    double xx = 0.0, xy = 0.0, yy = 0.0;
+    for (const auto& column : jacobianColumns) {
+        if (!finite(column))
+            throw std::invalid_argument("Non-finite Jacobian column");
+        xx += column.x * column.x;
+        xy += column.x * column.y;
+        yy += column.y * column.y;
+    }
+    const double trace = xx + yy;
+    if (!std::isfinite(trace) || !std::isfinite(xy))
+        throw std::overflow_error("Jacobian Gram matrix overflow");
+    if (trace == 0.0)
+        return std::numeric_limits<double>::infinity();
+    const double discriminant = std::hypot(xx - yy, 2.0 * xy);
+    const double largest = 0.5 * (trace + discriminant);
+    const double smallest = 0.5 * (trace - discriminant);
+    // Avoid reporting a misleading finite number at or near singularity.
+    if (smallest <= 1e-12 * largest)
+        return std::numeric_limits<double>::infinity();
+    return std::sqrt(largest / smallest);
 }
 
 } // namespace robotics::kinematics

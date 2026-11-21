@@ -38,6 +38,8 @@ struct PlannedJointPath2D {
     // End-effector positions sampled from the *actual* selected joint-space
     // trajectory (spline or verified polyline). Computed on the planner worker.
     std::vector<math::Vec2> endEffectorTrace;
+    // Intermediate joint traces sampled at the same times as the tool trace.
+    std::vector<std::vector<math::Vec2>> jointTraces;
     PlanningFailure2D failure{PlanningFailure2D::None};
 
     [[nodiscard]] bool found() const noexcept { return !waypoints.empty(); }
@@ -79,6 +81,12 @@ public:
     [[nodiscard]] std::span<const math::Vec2> endEffectorTrace() const noexcept {
         return endEffectorTrace_;
     }
+    [[nodiscard]] const std::vector<std::vector<math::Vec2>>&
+    jointTraces() const noexcept { return jointTraces_; }
+    [[nodiscard]] std::span<const double> finalJointAngles() const noexcept {
+        return path_.empty() ? std::span<const double>{} :
+                              std::span<const double>{path_.back()};
+    }
     [[nodiscard]] bool searchFailed() const noexcept { return failed_; }
     [[nodiscard]] PlanningFailure2D failureReason() const noexcept { return failure_; }
     [[nodiscard]] bool hasTarget() const noexcept { return hasTarget_; }
@@ -87,6 +95,7 @@ public:
 private:
     std::vector<std::vector<double>> path_;
     std::vector<math::Vec2> endEffectorTrace_;
+    std::vector<std::vector<math::Vec2>> jointTraces_;
     double endEffectorDistance_{};
     std::size_t index_{};
     double segmentElapsed_{};

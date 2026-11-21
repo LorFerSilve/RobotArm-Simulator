@@ -27,4 +27,10 @@ namespace robotics::kinematics {
 [[nodiscard]] double jacobianDeterminant2D(
     std::span<const math::Vec2> jacobianColumns);
 
+ // Spectral 2-norm condition number of a 2 x N translational Jacobian.
+ // Returns +infinity at rank-deficient poses (including an empty arm).
+ // Meaningful for both two-joint and redundant planar robots.
+ [[nodiscard]] double jacobianConditionNumber2D(
+     std::span<const math::Vec2> jacobianColumns);
+
 } // namespace robotics::kinematics
