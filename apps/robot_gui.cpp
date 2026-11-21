@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <array>
+#include <optional>
 #include <string>
 #include <stdexcept>
 #include <cmath>
@@ -144,7 +145,8 @@ void drawGrid(const Viewport& view, int canvasWidth, int height) {
 }
 
 void drawArm(const Viewport& view, const std::vector<Vec2>& positions,
-             Vec2 target, bool reachable) {
+             Vec2 target, bool reachable,
+             const std::optional<robotics::kinematics::TargetObject2D>& object) {
     const auto destination = view.toScreen(target);
     const Color targetColor = reachable ? green : red;
     DrawCircleLines(static_cast<int>(destination.x), static_cast<int>(destination.y),
@@ -158,6 +160,18 @@ void drawArm(const Viewport& view, const std::vector<Vec2>& positions,
     for (std::size_t i = 1; i < positions.size(); ++i) {
         DrawLineEx(view.toScreen(positions[i - 1]), view.toScreen(positions[i]),
                    10.0F, linkColors[(i - 1) % 3]);
+    }
+    if (object && positions.size() >= 2) {
+        const auto start = positions[positions.size() - 2];
+        const auto tip = positions.back();
+        const auto delta = tip - start;
+        const double length = delta.length();
+        if (length > 0.0) {
+            const auto toolStart = tip - delta *
+                (std::min(object->toolLength, length) / length);
+            DrawLineEx(view.toScreen(toolStart), view.toScreen(tip),
+                       6.0F, Color{81, 230, 173, 255});
+        }
     }
     for (std::size_t i = 0; i < positions.size(); ++i) {
         const auto p = view.toScreen(positions[i]);
@@ -190,7 +204,8 @@ void drawEndEffectorTrace(const Viewport& view, std::span<const Vec2> trace) {
 // Analyze overlay: visualize the model's link clearance and future pose.
 // These are graphical estimates, NOT certified continuous collision checks.
 void drawCollisionEnvelope(const Viewport& view, std::span<const Vec2> positions,
-                           Vec2 target, double linkRadius, double targetRadius) {
+                           Vec2 target, double linkRadius, double targetRadius,
+                           const std::optional<robotics::kinematics::TargetObject2D>& object) {
     const Color envelope{248, 181, 88, 48};
     const float thickness = std::max(2.0F,
         static_cast<float>(2.0 * linkRadius) * view.pixelsPerMetre);
@@ -203,11 +218,28 @@ void drawCollisionEnvelope(const Viewport& view, std::span<const Vec2> positions
         DrawCircleV(b, radius, envelope);
     }
     const auto pt = view.toScreen(target);
-    const float targetPixels =
-        static_cast<float>(targetRadius) * view.pixelsPerMetre;
-    DrawCircleV(pt, targetPixels, Color{246, 120, 122, 38});
-    DrawCircleLines(static_cast<int>(pt.x), static_cast<int>(pt.y),
-                    targetPixels, Color{246, 120, 122, 138});
+    const Color contactZone{246, 120, 122, 38};
+    const Color border{246, 120, 122, 138};
+    if (object && object->shape ==
+                  robotics::kinematics::TargetShape2D::Rectangle) {
+        // Square-corner visualization of the expanded target body.
+        // The engine applies isotropic rounded-corner clearance.
+        const float hw = static_cast<float>(
+            object->halfWidth + object->clearance) * view.pixelsPerMetre;
+        const float hh = static_cast<float>(
+            object->halfHeight + object->clearance) * view.pixelsPerMetre;
+        const Rectangle padded{pt.x-hw, pt.y-hh, 2.0F*hw, 2.0F*hh};
+        DrawRectangleRec(padded, contactZone);
+        DrawRectangleLinesEx(padded, 1.5F, border);
+    } else {
+        const double radiusMeters = object ?
+            object->radius + object->clearance : targetRadius;
+        const float targetPixels =
+            static_cast<float>(radiusMeters) * view.pixelsPerMetre;
+        DrawCircleV(pt, targetPixels, contactZone);
+        DrawCircleLines(static_cast<int>(pt.x), static_cast<int>(pt.y),
+                        targetPixels, border);
+    }
 }
 
 void drawJointTraces(const Viewport& view,
@@ -306,12 +338,99 @@ void drawScene(const Viewport& view, const std::vector<Obstacle2D>& obstacles,
     }
 }
 
+// Target-object editing lives in the existing SCENE tab. These values are
+// passed verbatim into MotionSettings2D, not a GUI-only approximation.
+void drawTargetBody(const Viewport& viewport, Vec2 center,
+                    const robotics::kinematics::TargetObject2D& object) {
+    const auto pixel = viewport.toScreen(center);
+    constexpr Color fill{245, 116, 115, 55};
+    constexpr Color edge{245, 140, 126, 185};
+    if (object.shape == robotics::kinematics::TargetShape2D::Circle) {
+        const float r = static_cast<float>(object.radius) *
+                        viewport.pixelsPerMetre;
+        DrawCircleV(pixel, r, fill);
+        DrawCircleLines(static_cast<int>(pixel.x), static_cast<int>(pixel.y),
+                        r, edge);
+    } else {
+        const float hw = static_cast<float>(object.halfWidth) *
+                         viewport.pixelsPerMetre;
+        const float hh = static_cast<float>(object.halfHeight) *
+                         viewport.pixelsPerMetre;
+        Rectangle rectangle{pixel.x - hw, pixel.y - hh, 2 * hw, 2 * hh};
+        DrawRectangleRec(rectangle, fill);
+        DrawRectangleLinesEx(rectangle, 2.0F, edge);
+    }
+}
+
+bool drawTargetObjectPanel(int panelX,
+                           robotics::kinematics::MotionSettings2D& settings,
+                           double finalLinkLength, Vector2 mouse, bool click) {
+    auto& object = *settings.targetObject;
+    using robotics::kinematics::TargetShape2D;
+    const int left = panelX + 20;
+    int y = headerHeight + 139;
+    bool changed = false;
+    DrawText("TARGET OBJECT GEOMETRY", left, y, 18, light);
+    y += 44;
+
+    if (button(left, y, 146, 33, "CIRCLE", mouse, click) &&
+        object.shape != TargetShape2D::Circle) {
+        object.shape = TargetShape2D::Circle;
+        changed = true;
+    }
+    if (button(left + 159, y, 146, 33, "RECTANGLE", mouse, click) &&
+        object.shape != TargetShape2D::Rectangle) {
+        object.shape = TargetShape2D::Rectangle;
+        changed = true;
+    }
+    y += 52;
+
+    auto row = [&](const char* title, double& value,
+                   double step, double minimum, double maximum) {
+        DrawText(title, left, y + 5, 15, muted);
+        DrawText(TextFormat("%.2f m", value), left + 120, y + 5, 15, light);
+        const bool decrease = button(left + 234, y, 30, 29, "-", mouse, click);
+        const bool increase = button(left + 274, y, 30, 29, "+", mouse, click);
+        if (decrease || increase) {
+            const double updated = std::clamp(
+                value + (increase ? step : -step), minimum, maximum);
+            if (updated != value) {
+                value = updated;
+                changed = true;
+            }
+        }
+        y += 44;
+    };
+
+    if (object.shape == TargetShape2D::Circle)
+        row("Radius", object.radius, 0.02, 0.04, 1.0);
+    else {
+        row("Half-width", object.halfWidth, 0.02, 0.04, 1.0);
+        row("Half-height", object.halfHeight, 0.02, 0.04, 1.0);
+    }
+    row("Shaft margin", object.clearance, 0.02, 0.0, 0.3);
+    row("Tool length", object.toolLength, 0.02, 0.02,
+        std::max(0.02, std::min(0.8, finalLinkLength - 0.02)));
+
+    y += 20;
+    DrawLine(left, y, left + 303, y, gridColor);
+    y += 21;
+    DrawText("Red: solid object (other links avoid).", left, y, 13, muted);
+    y += 24;
+    DrawText("Green: terminal tool-contact section.", left, y, 13, muted);
+    y += 24;
+    DrawText("Shaft stays outside object + margin.", left, y, 13, muted);
+    y += 27;
+    DrawText("Changes invalidate the previous path.", left, y, 13, orange);
+    return changed;
+}
+
 bool drawObstaclePanel(int x, int height, CanvasTool& tool,
                        std::vector<Obstacle2D>& obstacles, int& selected,
                        std::string& message, const std::vector<Vec2>& positions,
                        double clearance, Vector2 mouse, bool click) {
     const int left = x + 20;
-    int y = headerHeight + 83;
+    int y = headerHeight + 137;
     bool changed = false;
     DrawText("SCENE OBSTACLES", left, y, 19, light);
     y += 39;
@@ -771,10 +890,11 @@ int main() {
     SetTargetFPS(60);
 
     int jointCount = 2;
-    const robotics::kinematics::MotionSettings2D motionSettings = [] {
+    robotics::kinematics::MotionSettings2D motionSettings = [] {
         robotics::kinematics::MotionSettings2D settings{};
         settings.foldClearance = 0.55; // about 31.5 degrees away from a full fold
-        settings.targetClearance = 0.16; // target body/arm clearance, metres
+        settings.targetClearance = 0.16; // legacy compatibility only
+        settings.targetObject = robotics::kinematics::TargetObject2D{};
         return settings;
     }();
     auto appliedDefinition = makePreset(jointCount);
@@ -797,6 +917,7 @@ int main() {
     int selectedObstacle = -1;
     CanvasTool canvasTool = CanvasTool::Target;
     bool draggingObstacle = false;
+    bool targetEditorActive = true;
     Vec2 target{1.5, 1.5};
     double simulatedTime = 0.0;
     double accumulator = 0.0;
@@ -1060,10 +1181,15 @@ int main() {
         BeginScissorMode(0, headerHeight, canvasWidth, height - headerHeight);
         drawScene(viewport, displayObstacles,
                   replayActive ? -1 : selectedObstacle);
+        if (!replayActive && motionSettings.targetObject)
+            drawTargetBody(viewport, displayTarget, *motionSettings.targetObject);
         if (activeTab == 3)
             drawCollisionEnvelope(viewport, positions, displayTarget,
                                   motionSettings.obstacleClearance,
-                                  motionSettings.targetClearance);
+                                  motionSettings.targetClearance,
+                                  replayActive ?
+                                      std::optional<robotics::kinematics::TargetObject2D>{} :
+                                      motionSettings.targetObject);
         if (activeTab == 3 && !replayActive && plannedMotion.pathAvailable())
             drawJointTraces(viewport, plannedMotion.jointTraces(),
                             displayJoints, plannedMotion.finalJointAngles());
@@ -1071,7 +1197,9 @@ int main() {
             plannedMotion.pathAvailable())
             drawEndEffectorTrace(viewport, plannedMotion.endEffectorTrace());
         drawArm(viewport, positions, displayTarget,
-                !unreachable && !(plannedMotion.searchFailed() || !planningError.empty()));
+                !unreachable && !(plannedMotion.searchFailed() || !planningError.empty()),
+                replayActive ? std::optional<robotics::kinematics::TargetObject2D>{} :
+                               motionSettings.targetObject);
         EndScissorMode();
         DrawText("T Target   C Circle   B Box   V Move   DEL Remove   SPACE Pause   2-5 Presets",
                  20, height - 28, 15, muted);
@@ -1130,10 +1258,19 @@ int main() {
                 }
             }
         } else if (activeTab == 2 && !replayActive) {
-            const bool changed = drawObstaclePanel(
-                panelX, height, canvasTool, obstacles, selectedObstacle,
-                obstacleFeedback, positions, motionSettings.obstacleClearance,
-                cursor, click);
+            if (button(panelX + 20, headerHeight + 83, 146, 31,
+                       "TARGET OBJECT", cursor, click))
+                targetEditorActive = true;
+            if (button(panelX + 179, headerHeight + 83, 146, 31,
+                       "OBSTACLES", cursor, click))
+                targetEditorActive = false;
+            const bool changed = targetEditorActive ?
+                drawTargetObjectPanel(panelX, motionSettings,
+                                      joints.back().length, cursor, click) :
+                drawObstaclePanel(panelX, height, canvasTool, obstacles,
+                                  selectedObstacle, obstacleFeedback,
+                                  positions, motionSettings.obstacleClearance,
+                                  cursor, click);
             if (changed) sceneChanged();
         } else if (activeTab == 3) {
             const bool wasReplaying = replayActive;
