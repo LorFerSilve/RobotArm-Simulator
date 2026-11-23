@@ -1,6 +1,7 @@
 #include "robotics/geometry/Obstacles2D.hpp"
 #include "robotics/kinematics/ForwardKinematics.hpp"
 #include "robotics/kinematics/PathPlanning2D.hpp"
+#include "robotics/kinematics/SweptCollision2D.hpp"
 #include "robotics/kinematics/TargetObject2D.hpp"
 
 #include <cmath>
@@ -8,6 +9,7 @@
 #include <limits>
 #include <numbers>
 #include <stdexcept>
+#include <utility>
 #include <vector>
 
 using robotics::geometry::Box2D;
@@ -16,11 +18,14 @@ using robotics::geometry::segmentSignedDistanceToObstacle;
 using robotics::kinematics::Joint2D;
 using robotics::kinematics::JointLimits2D;
 using robotics::kinematics::MotionSettings2D;
+using robotics::kinematics::PlannedJointPath2D;
 using robotics::kinematics::PlannedMotion2D;
 using robotics::kinematics::TargetObject2D;
 using robotics::kinematics::TargetShape2D;
+using robotics::kinematics::advanceTowardTarget;
 using robotics::kinematics::forwardKinematics;
 using robotics::kinematics::planJointPath2D;
+using robotics::kinematics::sweptArmClear2D;
 using robotics::kinematics::targetApproachClear;
 using robotics::kinematics::targetBody2D;
 using robotics::kinematics::targetLinkPenetrations;
@@ -30,6 +35,32 @@ using robotics::math::Vec2;
 namespace {
 void require(bool condition, const char* message) {
     if (!condition) throw std::runtime_error(message);
+}
+
+void followTarget(std::vector<Joint2D> joints,
+                  const std::vector<JointLimits2D>& limits, Vec2 target,
+                  const MotionSettings2D& settings) {
+    const auto& object = *settings.targetObject;
+    PlannedMotion2D follower;
+    follower.setTarget(joints, limits, target, settings);
+    require(follower.pathAvailable(), "Planner must find a safe explicit-target route");
+    auto previous = targetLinkPenetrations(forwardKinematics(joints), target, object);
+    for (int frame = 0; frame < 1800; ++frame) {
+        const auto status = follower.advance(joints, limits, 1.0 / 60.0, settings);
+        require(!status.blocked, "Certified target approach must remain executable");
+        const auto positions = forwardKinematics(joints);
+        const auto depth = targetLinkPenetrations(positions, target, object);
+        for (std::size_t i = 0; i < depth.size(); ++i)
+            require(depth[i] <= previous[i] + 1e-9,
+                    "Execution created or deepened shaft contact");
+        previous = depth;
+        if (status.reached) {
+            require(targetApproachClear(positions, target, object),
+                    "Only the tool may be in contact on arrival");
+            return;
+        }
+    }
+    throw std::runtime_error("Follower did not reach the explicit target");
 }
 } // namespace
 
@@ -125,26 +156,39 @@ int main() {
         settings.targetClearance = 0.0; // proves explicit model overrides legacy
         settings.targetObject = circle;
         const Vec2 target{1.5, 1.5};
-        const auto path = planJointPath2D(initial, limits, target, settings);
-        require(path.found(), "Planner must accept a safe circular target pose");
-        PlannedMotion2D follower;
-        follower.usePlan(path, target);
-        auto moving = initial;
-        bool arrived = false;
-        for (int i = 0; i < 1500; ++i) {
-            const auto status =
-                follower.advance(moving, limits, 1.0 / 60.0, settings);
-            require(!status.blocked,
-                    "Explicit target contact must be safe during execution");
-            if (status.reached) { arrived = true; break; }
-        }
-        require(arrived, "Explicit circular target should be reached");
-
+        followTarget(initial, limits, target, settings);
         settings.targetObject = rectangle;
-        const auto rectanglePlan =
-            planJointPath2D(initial, limits, target, settings);
-        require(rectanglePlan.found(),
-                "Planner must accept a safe rectangular target pose");
+        followTarget(initial, limits, target, settings);
+
+        auto touching = initial;
+        touching[0].angle = 0.0;
+        const Vec2 touchingTarget{1.5, -0.065};
+        const std::vector<double> contactPose{0.0, -pi/2};
+        const std::vector<double> retreatPose{0.30, -pi/2};
+        const std::vector<double> deeperThenClear{-0.30, -pi/2};
+        for (const auto& object : {circle, rectangle}) {
+            require(!targetApproachClear(forwardKinematics(touching),
+                                         touchingTarget, object),
+                    "The retreat fixture must start in contact");
+            require(sweptArmClear2D(touching, contactPose, retreatPose, {}, 0.1, 0.1,
+                                     touchingTarget, object),
+                    object.shape == TargetShape2D::Circle ?
+                        "Monotonically separating circle contact must certify" :
+                        "Monotonically separating rectangle contact must certify");
+            require(!sweptArmClear2D(touching, contactPose, deeperThenClear, {}, 0.1, 0.1,
+                                      touchingTarget, object),
+                    "An edge must not deepen initial contact before clearing");
+            require(!sweptArmClear2D(touching, retreatPose, contactPose, {}, 0.1, 0.1,
+                                      touchingTarget, object),
+                    "A clear shaft must not re-enter the target");
+            settings.targetObject = object;
+            followTarget(touching, limits, touchingTarget, settings);
+            const Vec2 centeredTarget{1.5, 0.0};
+            require(sweptArmClear2D(touching, contactPose, retreatPose, {}, 0.1, 0.1,
+                                     centeredTarget, object),
+                    "A shaft starting through the target centre must be able to retreat");
+            followTarget(touching, limits, centeredTarget, settings);
+        }
 
         // A target containing the fixed base cannot be cleared; never
         // pretend that the terminal tool exemption applies to other links.
@@ -152,6 +196,53 @@ int main() {
             planJointPath2D(initial, limits, {0.0, 0.0}, settings);
         require(!invalidGoal.found(),
                 "Object covering fixed base must not be a reachable target");
+
+        // The first link must cross q[0] = 0 on any path to this target
+        // within the given shoulder limits. There it penetrates the circle
+        // by 1 micrometre, in a window narrower than the old sampling grid.
+        settings.targetObject = circle;
+        const Vec2 grazingTarget{2.159999, 0.0};
+        auto grazingStart = initial;
+        grazingStart[0].angle = -0.017123;
+        grazingStart[1].angle = -1.8;
+        auto crossing = grazingStart;
+        crossing[0].angle = 0.0;
+        require(targetApproachClear(forwardKinematics(grazingStart),
+                                    grazingTarget, circle),
+                "Grazing regression starts with clear links");
+        require(!targetApproachClear(forwardKinematics(crossing),
+                                     grazingTarget, circle),
+                "The analytic crossing pose must penetrate the target");
+        auto grazingLimits = limits;
+        grazingLimits[0].minAngle = -0.1;
+        grazingLimits[0].maxAngle = 0.8;
+        require(!planJointPath2D(grazingStart, grazingLimits,
+                                 grazingTarget, settings).found(),
+                "Planner must reject a target collision between samples");
+
+        // An installed polyline must pass the same check on every step.
+        grazingStart[0].angle = -0.0008;
+        PlannedJointPath2D unchecked;
+        unchecked.waypoints = {{-0.0008, -1.8}, {0.0032, -1.8}};
+        PlannedMotion2D follower;
+        follower.usePlan(std::move(unchecked), grazingTarget);
+        const auto step = follower.advance(grazingStart, grazingLimits, 0.06, settings);
+        require(step.blocked && grazingStart[0].angle == -0.0008,
+                "Follower must not cross the target between two clear poses");
+
+        TargetObject2D tangent = circle;
+        tangent.radius = 0.125;
+        require(!targetApproachClear(links, {1.0, 0.125}, tangent),
+                "Tangency of an upstream link is forbidden contact");
+
+        // The direct controller uses the explicit target even when the
+        // legacy radius is zero. Its first step would deepen existing contact.
+        auto directMotion = touching;
+        const Vec2 directTarget{1.0, 0.08};
+        const auto refused = advanceTowardTarget(directMotion, directTarget,
+                                                 1.0 / 60.0, settings, limits);
+        require(refused.blocked && directMotion[0].angle == touching[0].angle,
+                "Direct controller must not deepen explicit target contact");
 
         std::cout << "Explicit circle/rectangle target and tool contact passed\n";
     } catch (const std::exception& ex) {

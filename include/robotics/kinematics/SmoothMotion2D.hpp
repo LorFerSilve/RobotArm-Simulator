@@ -19,7 +19,7 @@ struct MotionSettings2D {
     double targetClearance{0.0};       // optional target-object radius, metres
     double obstacleClearance{0.10};    // robot half-width + obstacle safety margin, m
     double positionTolerance{0.005};  // metres
-    double maxAngularJerk{120.0};       // rad/s^3, global spline limit
+    double maxAngularJerk{120.0};       // rad/s^3, global planned-motion limit
     // Explicit target geometry and physical terminal tool section. When
     // omitted, existing targetClearance behavior is preserved for legacy APIs.
     std::optional<TargetObject2D> targetObject{};
@@ -44,7 +44,8 @@ struct MotionStatus2D {
 
 // One collision-checked, acceleration-limited fixed timestep. Mutates the arm.
 // Two links use analytic IK with a preserved elbow branch; three or more use
-// the existing Jacobian DLS solver. No dynamic forces or obstacle models.
+// the existing Jacobian DLS solver. Explicit targets use swept shaft checks.
+// Scene obstacles and dynamic forces are outside this controller's scope.
 // Optional limits are checked per joint. Empty limits preserve legacy behaviour.
 [[nodiscard]] MotionStatus2D advanceTowardTarget(
     std::span<Joint2D> joints, math::Vec2 target, double dt,
@@ -72,8 +73,8 @@ void targetLinkPenetrations(std::span<const math::Vec2> positions,
 
 // Explicit target-object contact geometry, independent from the legacy
 // point/radius overloads above. The last link has a specified distal tool
-// length; only that portion may contact the target body. A tip outside the
-// object's contact neighborhood never gets a shaft exemption.
+// length; only that portion may contact the target body. The entire
+// protected shaft is checked, including tangency at the clearance boundary.
 void targetLinkPenetrations(std::span<const math::Vec2> positions,
                             math::Vec2 target, const TargetObject2D& object,
                             std::span<double> depths);

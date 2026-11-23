@@ -17,7 +17,9 @@ enum class PlanningFailure2D {
     GoalInObstacle,
     NoIKSolution,
     PathSearchExhausted,
-    TargetBlockedByJointLimits
+    TargetBlockedByJointLimits,
+    MotionLimitExceeded,
+    UnsafeMotionStep
 };
 
 [[nodiscard]] const char* planningFailureMessage(PlanningFailure2D reason) noexcept;
@@ -87,7 +89,9 @@ public:
         return path_.empty() ? std::span<const double>{} :
                               std::span<const double>{path_.back()};
     }
-    [[nodiscard]] bool searchFailed() const noexcept { return failed_; }
+    [[nodiscard]] bool searchFailed() const noexcept {
+        return failed_ && path_.empty();
+    }
     [[nodiscard]] PlanningFailure2D failureReason() const noexcept { return failure_; }
     [[nodiscard]] bool hasTarget() const noexcept { return hasTarget_; }
     [[nodiscard]] math::Vec2 target() const noexcept { return target_; }

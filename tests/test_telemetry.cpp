@@ -15,6 +15,8 @@ using robotics::geometry::Box2D;
 using robotics::geometry::Circle2D;
 using robotics::geometry::Obstacle2D;
 using robotics::kinematics::Joint2D;
+using robotics::kinematics::TargetObject2D;
+using robotics::kinematics::TargetShape2D;
 using robotics::kinematics::jacobianConditionNumber2D;
 using robotics::math::Vec2;
 
@@ -53,6 +55,14 @@ int main() {
             Box2D{{-2.0, 1.5}, 0.6, 0.2}
         };
         TelemetryRecorder2D recording(3);
+        TargetObject2D circleTarget;
+        circleTarget.radius = 0.22;
+        circleTarget.clearance = 0.04;
+        TargetObject2D rectangleTarget = circleTarget;
+        rectangleTarget.shape = TargetShape2D::Rectangle;
+        rectangleTarget.halfWidth = 0.31;
+        rectangleTarget.halfHeight = 0.19;
+        rectangleTarget.toolLength = 0.48;
         recording.record(0.0, joints, {1.0, 2.0},
                          PlannerState2D::Idle, scene);
         require(recording.size() == 1 &&
@@ -62,7 +72,7 @@ int main() {
                 "First sample has no acceleration reference");
         joints[0].angularVelocity = 0.2;
         recording.record(0.1, joints, {1.1, 2.1},
-                         PlannerState2D::Moving, scene);
+                         PlannerState2D::Moving, scene, circleTarget);
         require(std::abs(recording.at(1).angularAccelerations[0] - 2.0) < 1e-12,
                 "Angular acceleration is measured from successive velocities");
         require(recording.at(1).plannerState == PlannerState2D::Moving,
@@ -70,7 +80,7 @@ int main() {
 
         joints[0].angle += 0.1;
         recording.record(0.2, joints, {1.3, 2.2},
-                         PlannerState2D::Paused, scene);
+                         PlannerState2D::Paused, scene, rectangleTarget);
         recording.record(0.3, joints, {1.5, 2.1},
                          PlannerState2D::Reached, scene);
         require(recording.size() == 3 &&
@@ -93,6 +103,19 @@ int main() {
                     a.joints.size() == b.joints.size() &&
                     a.obstacles.size() == b.obstacles.size(),
                     "Replay must preserve timing, targets, states and scene counts");
+            require(a.targetObject.has_value() == b.targetObject.has_value(),
+                    "Replay must preserve explicit target presence per frame");
+            if (a.targetObject) {
+                const auto& original = *a.targetObject;
+                const auto& restored = *b.targetObject;
+                require(original.shape == restored.shape &&
+                        original.radius == restored.radius &&
+                        original.halfWidth == restored.halfWidth &&
+                        original.halfHeight == restored.halfHeight &&
+                        original.clearance == restored.clearance &&
+                        original.toolLength == restored.toolLength,
+                        "Replay must preserve the target geometry and tool section");
+            }
             for (std::size_t j = 0; j < a.joints.size(); ++j)
                 require(a.joints[j].length == b.joints[j].length &&
                         a.joints[j].angle == b.joints[j].angle &&
@@ -105,9 +128,17 @@ int main() {
                 "Rectangle obstacle survives replay");
 
         {
+            std::ofstream legacy(badFile);
+            legacy << "RARM2D 2 1\n0 0 0 1 2 0\n1 0 0 0\n2 1 0 0\n";
+        }
+        TelemetryRecorder2D legacy;
+        legacy.load(badFile);
+        require(legacy.size() == 1 && !legacy.at(0).targetObject,
+                "Version 2 remains readable without fabricated target geometry");
+        {
             std::ofstream invalid(badFile);
-            invalid << "RARM2D 2 1\n0 0 0 1 2 0\n"
-                       "1 0 0 0\n2 nan 0 0\n";
+            invalid << "RARM2D 3 1\n0 0 0 1 2 0\n"
+                       "1 0 0 0\n2 1 0 0\nB 0.2 0.1 0.15 0.02 2.1\n";
         }
         bool rejected = false;
         try { loaded.load(badFile); }

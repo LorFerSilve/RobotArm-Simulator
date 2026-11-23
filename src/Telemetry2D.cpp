@@ -40,12 +40,23 @@ void TelemetryRecorder2D::record(
     double time, std::span<const kinematics::Joint2D> joints,
     math::Vec2 target, PlannerState2D state,
     std::span<const geometry::Obstacle2D> obstacles) {
+    record(time, joints, target, state, obstacles, std::nullopt);
+}
+
+void TelemetryRecorder2D::record(
+    double time, std::span<const kinematics::Joint2D> joints,
+    math::Vec2 target, PlannerState2D state,
+    std::span<const geometry::Obstacle2D> obstacles,
+    const std::optional<kinematics::TargetObject2D>& targetObject) {
     if (!std::isfinite(time) || !std::isfinite(target.x) ||
         !std::isfinite(target.y) || !validState(state) ||
         joints.size() < 2 ||
         (!frames_.empty() && time <= frames_.back().time))
         throw std::invalid_argument("Invalid time, target or planner state");
 
+    if (targetObject && (!kinematics::validTargetObject2D(*targetObject) ||
+                         targetObject->toolLength >= joints.back().length))
+        throw std::invalid_argument("Invalid recorded target geometry");
     for (const auto& obstacle : obstacles)
         if (!geometry::validObstacle(obstacle))
             throw std::invalid_argument("Invalid recorded obstacle");
@@ -61,6 +72,7 @@ void TelemetryRecorder2D::record(
     TelemetryFrame2D frame;
     frame.time = time;
     frame.target = target;
+    frame.targetObject = targetObject;
     frame.plannerState = state;
     frame.joints.assign(joints.begin(), joints.end());
     frame.obstacles.assign(obstacles.begin(), obstacles.end());
@@ -89,7 +101,7 @@ void TelemetryRecorder2D::record(
 void TelemetryRecorder2D::save(const std::string& path) const {
     std::ofstream out(path, std::ios::trunc);
     if (!out) throw std::runtime_error("Could not open telemetry file for writing");
-    out << std::setprecision(17) << "RARM2D 2 " << frames_.size() << '\n';
+    out << std::setprecision(17) << "RARM2D 3 " << frames_.size() << '\n';
     for (const auto& frame : frames_) {
         out << frame.time << ' ' << frame.target.x << ' ' << frame.target.y
             << ' ' << static_cast<int>(frame.plannerState)
@@ -110,6 +122,14 @@ void TelemetryRecorder2D::save(const std::string& path) const {
                     << ' ' << box.halfWidth << ' ' << box.halfHeight << '\n';
             }
         }
+        if (const auto& object = frame.targetObject) {
+            const char kind = object->shape == kinematics::TargetShape2D::Circle ? 'C' : 'B';
+            out << kind << ' ' << object->radius << ' ' << object->halfWidth << ' '
+                << object->halfHeight << ' ' << object->clearance << ' '
+                << object->toolLength << '\n';
+        } else {
+            out << "N\n";
+        }
     }
     if (!out) throw std::runtime_error("Could not write telemetry file");
 }
@@ -122,7 +142,7 @@ void TelemetryRecorder2D::load(const std::string& path) {
     int version = 0;
     std::size_t count = 0;
     if (!(in >> magic >> version >> count) ||
-        magic != "RARM2D" || version != 2 || count > capacity_)
+        magic != "RARM2D" || (version != 2 && version != 3) || count > capacity_)
         throw std::runtime_error("Unsupported or oversized telemetry file");
 
     TelemetryRecorder2D parsed(capacity_);
@@ -168,8 +188,22 @@ void TelemetryRecorder2D::load(const std::string& path) {
                 throw std::runtime_error("Unknown telemetry obstacle type");
             }
         }
-        parsed.record(time, joints, target,
-                      static_cast<PlannerState2D>(state), obstacles);
+        std::optional<kinematics::TargetObject2D> targetObject;
+        if (version == 3) {
+            char kind = 0;
+            if (!(in >> kind) || (kind != 'N' && kind != 'C' && kind != 'B'))
+                throw std::runtime_error("Malformed telemetry target");
+            if (kind != 'N') {
+                auto& object = targetObject.emplace();
+                object.shape = kind == 'C' ? kinematics::TargetShape2D::Circle :
+                                             kinematics::TargetShape2D::Rectangle;
+                if (!(in >> object.radius >> object.halfWidth >> object.halfHeight
+                         >> object.clearance >> object.toolLength))
+                    throw std::runtime_error("Malformed telemetry target geometry");
+            }
+        }
+        parsed.record(time, joints, target, static_cast<PlannerState2D>(state),
+                      obstacles, targetObject);
         parsed.frames_.back().angularAccelerations =
             std::move(accelerations);
     }

@@ -2,10 +2,12 @@
 
 #include "robotics/geometry/Obstacles2D.hpp"
 #include "robotics/kinematics/Joint2D.hpp"
+#include "robotics/kinematics/TargetObject2D.hpp"
 #include "robotics/math/Vec2.hpp"
 
 #include <cstddef>
 #include <deque>
+#include <optional>
 #include <span>
 #include <string>
 #include <vector>
@@ -27,6 +29,7 @@ struct TelemetryFrame2D {
     double cartesianError{};                  // metres
     double jacobianCondition{};               // +infinity = singular
     PlannerState2D plannerState{PlannerState2D::Idle};
+    std::optional<kinematics::TargetObject2D> targetObject;
 };
 
 // Bounded, deterministic diagnostic recording. No raylib dependencies.
@@ -41,6 +44,12 @@ public:
                 math::Vec2 target,
                 PlannerState2D state,
                 std::span<const geometry::Obstacle2D> obstacles = {});
+    void record(double time,
+                std::span<const kinematics::Joint2D> joints,
+                math::Vec2 target,
+                PlannerState2D state,
+                std::span<const geometry::Obstacle2D> obstacles,
+                const std::optional<kinematics::TargetObject2D>& targetObject);
 
     void clear() noexcept { frames_.clear(); }
     [[nodiscard]] bool empty() const noexcept { return frames_.empty(); }

@@ -9,7 +9,7 @@ A modular C++20 robotic arm simulator featuring custom kinematics, Jacobian-base
 - Analytic 2 x N Jacobian, Cartesian end-effector velocity, and 2-joint determinant.
 - Custom damped least-squares inverse kinematics, velocity limiting, and target tolerance.
 - Collision-aware GUI motion: analytic two-link IK with a stable elbow branch, angular speed/acceleration caps, joint clearance, nonadjacent-link collision checks, and extra target-object/folding safeguards.
-- CLI frame telemetry and fourteen automatic tests using CTest.
+- CLI frame telemetry and 25 automatic tests using CTest.
 - Interactive 2D GUI, using raylib **only** for display and input: target selection by mouse, real-time telemetry, pause/reset, grid and zoom.
 - **Configurable robot arm (Phase 1):** edit 2–6 joints, each link's length and initial relative angle, per-joint rotation range, maximum speed, and maximum acceleration in the GUI.
 
@@ -51,7 +51,7 @@ The GUI uses 60 Hz fixed-step simulation and a 60 FPS rendering target. Renderin
 | Input | Function |
 | --- | --- |
 | Left click/drag within the canvas | Set the end-effector target (metres); safe joint-space motion is planned on mouse release for all arms |
-| `Space` | Pause/resume |
+| `Space` | Freeze or resume the simulation clock and motion state |
 | `R` | Reset to initial pose and target |
 | `2` | Two-joint robot preset |
 | `3` | Three-joint robot preset |
@@ -65,7 +65,11 @@ The GUI uses 60 Hz fixed-step simulation and a 60 FPS rendering target. Renderin
 
 The right panel shows target and tip coordinates, Cartesian speed, goal error, simulation time, per-joint angles and angular velocities.
 
-**Limitations:** The two-link robot stays on its original elbow branch and avoids collinear, overlapping configurations. Targets outside the resulting annular workspace are marked **UNREACHABLE** and approached only to the nearest permitted radius; the robot then settles instead of oscillating. For 3+ links, the new path planner searches for an alternative collision-free joint configuration and a sequence of safe joint-space waypoints. This is a **bounded, sampling-based search**, not a complete solver: if it cannot find a route within its budget, the GUI displays **NO SAFE PATH FOUND** and does not move through the blocked configuration. The existing controller is still available in the core library; physical obstacle modeling, joint torques and dynamics are not implemented.
+The two-link planner preserves the elbow branch. A geometrically reachable
+pose within the position tolerance is accepted if it meets the joint and
+collision constraints. The bounded search reports **NO SAFE PATH FOUND**
+if it cannot find a route. **BLOCKED** identifies a step rejected during
+execution.
 
 ## Math and IK conventions
 
@@ -321,11 +325,10 @@ for solid scene obstacles. Clearance around the link centerline is 0.10 m
 The collision functions support circular and rectangular solids, with
 Euclidean clearances (not only axis-aligned bounding boxes).
 
-Changing the geometry immediately invalidates the old path; the follower
-also rechecks new scene geometry at every movement step. The path sampling
-is fine-grained but is **not yet a mathematically certified continuous
-swept-volume detector**. For guaranteed safety with moving obstacles,
-background replanning and continuous collision detection remain future work.
+Changing the geometry immediately invalidates the old path. The follower
+certifies each linear joint-space step against the current static scene.
+Moving obstacles and continuous certification of curved spline arcs remain
+open.
 
 The new `Obstacles2D` CTest checks geometry, clearances, impossible targets,
 invalid starting configurations, the planner and the actual follower.
@@ -367,9 +370,10 @@ is set to zero at that corner and the robot makes a safe stop there.
 Thus smoothing is *opportunistic*, never a bypass for collision rules.
 If a complete smoothed profile cannot be validated due to geometry or
 floating-point differences, the original collision-checked waypoint
-follower remains available as a safe fallback; the goal is **not**
-discarded simply because a cosmetic trajectory improvement failed.
-There is still no certified swept-volume geometry or real-world dynamics.
+follower remains available as a fallback. The quintic fallback also
+applies the configured jerk bound. Spline validation certifies the
+linear chords between samples, and execution certifies its linear
+steps. A continuous certificate for the spline itself remains open.
 
 The GUI prepares this trajectory on the asynchronous worker, so smoothing
 itself does not interrupt rendering. The `SmoothTrajectory2D` CTest
@@ -517,7 +521,8 @@ These are visualization aids and **not certified swept-volume safety**.
 ### Recording and playback
 
 The engine stores time, all link lengths and joint angles/velocities,
-Cartesian target, scene obstacles and planner state for each sample.
+Cartesian target, explicit target geometry and tool-contact length,
+scene obstacles and planner state for each sample.
 Error, accelerations and Jacobian condition are derived from the recorded
 geometry. The diagnostic record has a bounded capacity of 3,600 frames
 in order to avoid unbounded GUI memory usage.
@@ -530,10 +535,10 @@ Press **EXIT** to leave replay mode; returning to the live simulator
 remains paused and requires **Space** to plan and resume. Replay never
 executes IK/RRT or changes live robot geometry.
 
-The `.rarm` file is a versioned, dependency-free text format. Only
-complete, validated recordings are installed; malformed data will not
-replace the previous session. The file is excluded from Git via
-`.gitignore`.
+The `.rarm` file is a versioned, dependency-free text format. Version 3
+preserves the target shape, dimensions, shaft clearance and tool length.
+Version 2 recordings remain readable. A malformed file leaves the
+previous session intact. Git ignores the GUI's session file.
 
 Phase 4 is covered by `Telemetry2D` CTest, including singularity
 detection, derived acceleration, bounded history, file round-trips,
@@ -544,26 +549,18 @@ remains part of CI.
 
 ## New 2D roadmap — 2D-A, Geometry & Collision Safety (first milestone)
 
-A new engine-only function, `sweptArmClear2D()`, now conservatively
-validates **the full linear joint-space interpolation** against static
-circle/rectangle obstacles and nonadjacent-link self-contact. It is
-called by the common planner edge checker, which is also used by the
-trajectory follower and spline validation.
+`sweptArmClear2D()` conservatively validates the full linear joint-space
+interpolation against static circle and rectangle obstacles, nonadjacent
+links and explicit targets. The planner, follower and spline chord checks
+all use the same edge validator.
 
 Unlike a fixed number of discrete collision samples, this check derives
 a bound on the maximum displacement of any link endpoint during a time
 interval. If its midpoint has enough clearance to cover that bound,
 the **entire** interval is safe for the represented capsule geometry.
-Otherwise it recursively subdivides the interval. An actual collision,
-cancellation, or unresolved interval at the fixed recursion limit
-**rejects** the edge rather than assuming it is safe.
-
-This is a **conservative collision certificate for straight joint-space
-segments** under the model's numeric accuracy and static scene assumption,
-not continuous collision detection for arbitrary moving obstacles,
-target-tool contact, or real hardware. The existing target-object exception
-and monotonic-contact retreat are still governed by sampled checks; more
-complete target/tool geometry is the next 2D-A milestone.
+Otherwise it subdivides the interval. Collision, cancellation and
+exhaustion of the depth or work budget reject the edge. The certificate
+assumes static geometry and the numeric accuracy of the 2D model.
 
 The `SweptCollision2D` regression covers a very narrow circle contact
 *between* the older 0.04-radian samples, a four-link self-intersection
@@ -582,12 +579,11 @@ the physical contact section on the final link in green.
 
 For explicit models, the core checks **every upstream link and the
 non-tool portion of the final link** against the target object's actual
-geometry and the configured clearance. Only the specified terminal tool
-section may touch the object, and only when the endpoint is within its
-contact neighborhood. Other links and the final shaft cannot use this
-exemption. A newly selected target already intersecting the arm can
-still be approached by the existing non-increasing-penetration retreat
-rule. The geometry also rejects targets containing the immovable base.
+geometry and configured clearance. Only the specified terminal tool
+section may touch the target. A link already in contact may retreat
+when the interval check can certify nondecreasing signed distance.
+Once a shaft clears the target, it must stay clear. A target touching the
+immovable base is rejected.
 
 The target shape and tool length are carried by `MotionSettings2D`
 through the asynchronous planner, IK goal validation, RRT edge checking,
@@ -596,14 +592,11 @@ plan. Existing `targetClearance`-based functions remain available so
 older CLI clients and regression fixtures retain their old behavior;
 the GUI opts into the new explicit model.
 
-**Limits of this milestone:** although static-scene/self swept
-collision certificates already exist, the target object's approach
-retreat still checks a sampled penetration profile. Continuous
-target-object contact certification, approach-facing direction,
-and independent link radii remain open in 2D-A and 2D-D.
+The continuous target checks apply to the explicit model. Legacy
+`targetClearance` retains its sampled behavior. Independent link radii,
+approach-facing direction and continuous swept checks for arbitrary curves
+remain open.
 
-The new `TargetObject2D` regression checks circle and rectangle
-geometry, exposed tool versus shaft contact, additional margins,
-rectangle penetration depth, invalid configurations, and end-to-end
-planning and execution using the new target model. The existing
-release-motion suites remain unchanged.
+`TargetObject2D` covers both shapes through planning and execution,
+including safe retreat, deeper contact, re-entry and a grazing collision
+between clear samples.

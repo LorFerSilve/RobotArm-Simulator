@@ -2,9 +2,11 @@
 
 #include "robotics/kinematics/ForwardKinematics.hpp"
 #include "robotics/kinematics/InverseKinematics2D.hpp"
+#include "robotics/kinematics/SweptCollision2D.hpp"
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <numbers>
 #include <stdexcept>
 #include <vector>
@@ -18,28 +20,50 @@ bool finite(math::Vec2 p) {
     return std::isfinite(p.x) && std::isfinite(p.y);
 }
 
-double cross(math::Vec2 a, math::Vec2 b) {
-    return a.x * b.y - a.y * b.x;
+int sideOfLine(math::Vec2 a, math::Vec2 b, math::Vec2 p) {
+    const auto direction = b - a;
+    const auto offset = p - a;
+    const double directionScale = std::max(std::abs(direction.x), std::abs(direction.y));
+    const double offsetScale = std::max(std::abs(offset.x), std::abs(offset.y));
+    if (directionScale == 0.0 || offsetScale == 0.0 ||
+        !std::isfinite(directionScale) || !std::isfinite(offsetScale))
+        return 0;
+
+    // Normalize before taking the determinant. A fixed epsilon in square
+    // metres can hide crossings of short links. Ambiguous signs remain
+    // possible contact if the segments' bounding boxes overlap.
+    const double left = (direction.x / directionScale) * (offset.y / offsetScale);
+    const double right = (direction.y / directionScale) * (offset.x / offsetScale);
+    const double determinant = left - right;
+    const double uncertainty = 8.0 * std::numeric_limits<double>::epsilon() *
+                               (std::abs(left) + std::abs(right));
+    if (determinant > uncertainty) return 1;
+    if (determinant < -uncertainty) return -1;
+    return 0;
 }
 
 double pointDistance(math::Vec2 p, math::Vec2 a, math::Vec2 b) {
     const auto ab = b - a;
-    const double d = ab.dot(ab);
-    const double t = d > 0.0 ? std::clamp((p - a).dot(ab) / d, 0.0, 1.0) : 0.0;
-    return (p - (a + ab * t)).length();
+    const auto offset = p - a;
+    const double length = ab.length();
+    if (length == 0.0) return offset.length();
+    if (!std::isfinite(length)) return 0.0;
+    const math::Vec2 direction{ab.x / length, ab.y / length};
+    const double projected = std::clamp(offset.dot(direction), 0.0, length);
+    const double distance = (offset - direction * projected).length();
+    return std::isnan(distance) ? 0.0 : distance;
 }
 
 double segmentDistance(math::Vec2 a, math::Vec2 b, math::Vec2 c, math::Vec2 d) {
-    const auto ab = b - a;
-    const auto cd = d - c;
-    const double abCrossCd = cross(ab, cd);
-    if (std::abs(abCrossCd) > 1e-12) {
-        const double t = cross(c - a, cd) / abCrossCd;
-        const double u = cross(c - a, ab) / abCrossCd;
-        if (t >= 0.0 && t <= 1.0 && u >= 0.0 && u <= 1.0) {
-            return 0.0;
-        }
-    }
+    const auto overlaps = [](double a, double b, double c, double d) {
+        return std::max(a, b) >= std::min(c, d) &&
+               std::max(c, d) >= std::min(a, b);
+    };
+    if (overlaps(a.x, b.x, c.x, d.x) && overlaps(a.y, b.y, c.y, d.y) &&
+        sideOfLine(a, b, c) * sideOfLine(a, b, d) <= 0 &&
+        sideOfLine(c, d, a) * sideOfLine(c, d, b) <= 0)
+        return 0.0;
+
     return std::min({pointDistance(a, c, d), pointDistance(b, c, d),
                      pointDistance(c, a, b), pointDistance(d, a, b)});
 }
@@ -213,18 +237,13 @@ void validateObjectContact(std::span<const math::Vec2> positions,
         throw std::invalid_argument("Tool contact length must be shorter than final link");
 }
 
-double objectDepthAt(std::span<const math::Vec2> positions,
-                     std::size_t index, const geometry::Obstacle2D& body,
-                     const TargetObject2D& object, bool toolNear) {
-    auto end = positions[index + 1];
-    if (toolNear && index + 2 == positions.size()) {
-        const auto shaft = positions[index + 1] - positions[index];
-        const double length = shaft.length();
-        end = positions[index] + shaft * ((length - object.toolLength) / length);
-    }
-    const double signedDistance =
-        geometry::segmentSignedDistanceToObstacle(positions[index], end, body);
-    return std::max(0.0, object.clearance - signedDistance);
+math::Vec2 protectedEnd(std::span<const math::Vec2> positions,
+                        std::size_t index, const TargetObject2D& object) {
+    const auto end = positions[index + 1];
+    if (index + 2 != positions.size()) return end;
+    const auto shaft = end - positions[index];
+    const double length = shaft.length();
+    return positions[index] + shaft * ((length - object.toolLength) / length);
 }
 
 } // namespace
@@ -234,14 +253,11 @@ void targetLinkPenetrations(std::span<const math::Vec2> positions,
                             std::span<double> depths) {
     validateObjectContact(positions, target, object, depths.size());
     const auto body = targetBody2D(object, target);
-    // Exempt only the explicit tool section AND only when the tool endpoint
-    // is close enough to actually make contact with this object.
-    const bool toolNear =
-        geometry::segmentSignedDistanceToObstacle(
-            positions.back(), positions.back(), body) <=
-            object.toolLength + object.clearance;
-    for (std::size_t i = 0; i < depths.size(); ++i)
-        depths[i] = objectDepthAt(positions, i, body, object, toolNear);
+    for (std::size_t i = 0; i < depths.size(); ++i) {
+        const double signedDistance = geometry::segmentSignedDistanceToObstacle(
+            positions[i], protectedEnd(positions, i, object), body);
+        depths[i] = std::max(0.0, object.clearance - signedDistance);
+    }
 }
 
 std::vector<double> targetLinkPenetrations(
@@ -256,12 +272,10 @@ bool targetApproachClear(std::span<const math::Vec2> positions,
                          math::Vec2 target, const TargetObject2D& object) {
     validateObjectContact(positions, target, object, positions.size() - 1);
     const auto body = targetBody2D(object, target);
-    const bool toolNear =
-        geometry::segmentSignedDistanceToObstacle(
-            positions.back(), positions.back(), body) <=
-            object.toolLength + object.clearance;
     for (std::size_t i = 0; i + 1 < positions.size(); ++i)
-        if (objectDepthAt(positions, i, body, object, toolNear) > 0.0)
+        if (geometry::segmentHitsObstacle(
+                positions[i], protectedEnd(positions, i, object),
+                body, object.clearance))
             return false;
     return true;
 }
@@ -323,6 +337,10 @@ MotionStatus2D advanceTowardTarget(std::span<Joint2D> joints, math::Vec2 target,
         totalLength += joint.length;
     }
     if (!std::isfinite(totalLength)) throw std::overflow_error("Invalid arm reach");
+    if (options.targetObject &&
+        (!validTargetObject2D(*options.targetObject) ||
+         options.targetObject->toolLength >= joints.back().length))
+        throw std::invalid_argument("Invalid target object or tool contact length");
     const auto positions = forwardKinematics(joints);
     if (!allowedAngles(joints, joints, options.jointClearance, options.foldClearance) ||
         hasSelfCollision(positions, options.linkClearance))
@@ -334,11 +352,29 @@ MotionStatus2D advanceTowardTarget(std::span<Joint2D> joints, math::Vec2 target,
         throw std::overflow_error("Target position error overflow");
     status.reached = status.positionError <= options.positionTolerance;
     status.outOfReach = target.length() > totalLength;
-    if (!targetApproachClear(positions, target, options.targetClearance)) {
+    if (!options.targetObject &&
+        !targetApproachClear(positions, target, options.targetClearance)) {
         status.blocked = true;
         for (auto& joint : joints) joint.angularVelocity = 0.0;
         return status;
     }
+    std::vector<double> startAngles;
+    std::vector<double> endAngles;
+    if (options.targetObject || joints.size() > 2) {
+        startAngles.reserve(joints.size());
+        for (const auto& joint : joints) startAngles.push_back(joint.angle);
+        endAngles.resize(joints.size());
+    }
+    const auto sweptStepClear = [&](std::span<const Joint2D> next) {
+        for (std::size_t i = 0; i < endAngles.size(); ++i)
+            endAngles[i] = next[i].angle;
+        if (options.targetObject)
+            return sweptArmClear2D(joints, startAngles, endAngles, {},
+                                   options.linkClearance, 0.0, target,
+                                   *options.targetObject);
+        return sweptArmClear2D(joints, startAngles, endAngles, {},
+                               options.linkClearance, 0.0);
+    };
     if (joints.size() == 2) {
         const auto pose = analyticTwoLinkPose(
             joints, target, options.jointClearance, options.foldClearance, positions.back());
@@ -393,7 +429,14 @@ MotionStatus2D advanceTowardTarget(std::span<Joint2D> joints, math::Vec2 target,
         // Guard the entire per-frame sweep, not only the proposed endpoint.
         // If the selected target lies on the arm, stop safely instead of
         // pushing an intermediate link through the object.
-        if (options.targetClearance > 0.0) {
+        if (options.targetObject) {
+            if (!sweptStepClear(proposal)) {
+                status.blocked = true;
+                status.constrained = true;
+                for (auto& joint : joints) joint.angularVelocity = 0.0;
+                return status;
+            }
+        } else if (options.targetClearance > 0.0) {
             std::vector<Joint2D> sweep(joints.begin(), joints.end());
             for (int sub = 1; sub <= 8; ++sub) {
                 for (std::size_t i = 0; i < joints.size(); ++i)
@@ -445,15 +488,19 @@ MotionStatus2D advanceTowardTarget(std::span<Joint2D> joints, math::Vec2 target,
                 }
                 if (!allowedAngles(joints, intermediate, options.jointClearance,
                                    options.foldClearance) ||
-                    !withinLimits(intermediate, limits) ||
-                    hasSelfCollision(forwardKinematics(intermediate), options.linkClearance) ||
+                    !withinLimits(intermediate, limits)) {
+                    safe = false;
+                    break;
+                }
+                if (!options.targetObject &&
                     !targetApproachClear(forwardKinematics(intermediate), target,
                                          options.targetClearance)) {
                     safe = false;
                     break;
                 }
             }
-            if (safe) break;
+            if (safe && sweptStepClear(intermediate)) break;
+            safe = false;
         }
         if (scale < 1.0 || !safe) status.constrained = true;
         if (!safe) {

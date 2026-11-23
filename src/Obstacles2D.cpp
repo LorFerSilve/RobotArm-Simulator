@@ -20,10 +20,15 @@ double squaredDistance(math::Vec2 a, math::Vec2 b) {
 
 double pointSegmentSquared(math::Vec2 p, math::Vec2 a, math::Vec2 b) {
     const math::Vec2 ab = b - a;
-    const double lengthSquared = ab.dot(ab);
-    if (lengthSquared == 0.0) return squaredDistance(p, a);
-    const double t = std::clamp((p - a).dot(ab) / lengthSquared, 0.0, 1.0);
-    return squaredDistance(p, a + ab * t);
+    const auto offset = p - a;
+    const double length = ab.length();
+    if (length == 0.0) return squaredDistance(p, a);
+    // Avoid a squared-length denominator that can overflow even when the
+    // true distance to a long segment is zero. Unknown distances fail closed.
+    if (!std::isfinite(length) || !finite(offset)) return 0.0;
+    const math::Vec2 direction{ab.x / length, ab.y / length};
+    const double t = std::clamp(offset.dot(direction), 0.0, length);
+    return squaredDistance(offset, direction * t);
 }
 
 double pointBoxSquared(math::Vec2 p, const Box2D& box) {

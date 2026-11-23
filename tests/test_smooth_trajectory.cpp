@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cmath>
 #include <iostream>
+#include <limits>
 #include <numbers>
 #include <stdexcept>
 #include <vector>
@@ -11,7 +12,9 @@
 using robotics::kinematics::Joint2D;
 using robotics::kinematics::JointLimits2D;
 using robotics::kinematics::MotionSettings2D;
+using robotics::kinematics::PlannedJointPath2D;
 using robotics::kinematics::PlannedMotion2D;
+using robotics::kinematics::PlanningFailure2D;
 using robotics::kinematics::forwardKinematics;
 using robotics::kinematics::hasSelfCollision;
 using robotics::kinematics::planJointPath2D;
@@ -74,12 +77,103 @@ void run(std::vector<Joint2D> joints, std::vector<JointLimits2D> limits,
         require(std::abs(j.angularVelocity) < 1e-8, "Robot must stop at final target");
 }
 
+void checkExecutionFailure() {
+    constexpr double pi = std::numbers::pi;
+    std::vector<Joint2D> joints{{2.0, pi/2}, {1.0, -pi/2}};
+    const std::vector<JointLimits2D> limits{
+        {-2*pi, 2*pi, 2.0, 6.0}, {-pi + 0.56, -0.16, 2.0, 6.0}
+    };
+    const Vec2 target{1.5, 1.5};
+    PlannedMotion2D follower;
+    follower.setTarget(joints, limits, target);
+    require(follower.pathAvailable(), "Execution fixture must start with a plan");
+    const std::vector<robotics::geometry::Obstacle2D> changedScene{
+        robotics::geometry::Circle2D{{0, 1}, 0.2}
+    };
+    constexpr double dt = 1.0 / 60.0;
+    const auto before = forwardKinematics(joints).back();
+    const auto status = follower.advance(joints, limits, dt, {}, changedScene);
+    require(status.blocked && status.constrained && !follower.searchFailed() &&
+                follower.failureReason() == PlanningFailure2D::UnsafeMotionStep,
+            "A blocked step must report an execution failure after a successful search");
+    require((forwardKinematics(joints).back() - before).length() == 0.0,
+            "A blocked step must leave the pose unchanged");
+}
+
+void checkPolylineLimits() {
+    constexpr double pi = std::numbers::pi;
+    constexpr double dt = 1.0 / 60.0;
+    const std::vector<Joint2D> start{{2.0, 0.0}, {1.0, -pi/2}};
+    auto goal = start;
+    goal[0].angle = 1.0;
+    const Vec2 target = forwardKinematics(goal).back();
+    std::vector<JointLimits2D> limits{
+        {-2*pi, 2*pi, 2.0, 6.0}, {-pi + 0.56, -0.16, 2.0, 6.0}
+    };
+    MotionSettings2D settings;
+    settings.maxAngularJerk = 1.0;
+    PlannedJointPath2D plan;
+    plan.waypoints = {{0.0, -pi/2}, {1.0, -pi/2}};
+
+    PlannedMotion2D follower;
+    follower.usePlan(plan, target);
+    auto joints = start;
+    bool arrived = false;
+    double lastAcceleration = 0.0;
+    for (int frame = 0; frame < 600; ++frame) {
+        const double oldVelocity = joints[0].angularVelocity;
+        const auto state = follower.advance(joints, limits, dt, settings);
+        require(!state.blocked, "Valid polyline must be executable");
+        const double acceleration = (joints[0].angularVelocity - oldVelocity) / dt;
+        require(std::abs(acceleration - lastAcceleration) <=
+                    settings.maxAngularJerk * dt + 1e-7,
+                "Polyline must use the configured jerk limit");
+        lastAcceleration = acceleration;
+        if (state.reached) { arrived = true; break; }
+    }
+    require(arrived, "Jerk-limited fallback must finish");
+
+    joints = start;
+    follower.usePlan(plan, target);
+    for (int i = 0; i < 40; ++i)
+        require(!follower.advance(joints, limits, dt, settings).blocked,
+                "The original limit must allow motion");
+    const double before = joints[0].angle;
+    limits[0].maxAngularSpeed = 0.01;
+    const auto state = follower.advance(joints, limits, dt, settings);
+    require(state.blocked && joints[0].angle == before &&
+                follower.failureReason() == PlanningFailure2D::MotionLimitExceeded,
+            "A stricter runtime limit must invalidate the old timing before movement");
+
+    MotionSettings2D badSettings;
+    badSettings.maxAngularSpeed = std::numeric_limits<double>::quiet_NaN();
+    bool rejected = false;
+    try { (void)planJointPath2D(start, limits, target, badSettings); }
+    catch (const std::invalid_argument&) { rejected = true; }
+    require(rejected, "Planner must reject non-finite speed limits");
+
+    auto badPlan = plan;
+    badPlan.waypoints.back().pop_back();
+    rejected = false;
+    try { follower.usePlan(badPlan, target); }
+    catch (const std::invalid_argument&) { rejected = true; }
+    require(rejected, "Follower must reject inconsistent waypoint dimensions");
+    follower.usePlan(plan, target);
+    rejected = false;
+    try { (void)follower.advance(joints, limits, dt, settings); }
+    catch (const std::invalid_argument&) { rejected = true; }
+    require(rejected && joints[0].angle == before,
+            "A plan from a stale pose must leave the arm unchanged");
+}
+
 int main() {
     try {
         constexpr double pi = std::numbers::pi;
         run({{2.0, pi/2, 0.0}, {1.0, -pi/2, 0.0}},
             {{-2*pi, 2*pi, 2.0, 6.0},
              {-pi + 0.56, -0.16, 2.0, 6.0}}, {1.5, 1.5});
+        checkExecutionFailure();
+        checkPolylineLimits();
 
         std::vector<Joint2D> three{
             {1.25, 0.3, 0.0}, {0.75, -0.7, 0.0}, {1.1, 0.8, 0.0}

@@ -826,7 +826,7 @@ void drawSidebar(int screenWidth, int height, const std::vector<Joint2D>& joints
         (stalled || unreachable || noPath) ? red : constrained ? orange : blue;
     DrawText(status, left, y, 16, statusColor);
     y += 33;
-    if (noPath && !planning) {
+    if ((noPath || stalled) && !planning) {
         DrawText(failureReason, left, y, 13, red);
         y += 25;
     }
@@ -929,7 +929,11 @@ int main() {
     std::string planningError;
     bool pendingPlan = true;
     bool draggingTarget = false;
-    recorder.record(0.0, joints, target, PlannerState2D::Idle, obstacles);
+    const auto recordFrame = [&](PlannerState2D state) {
+        recorder.record(simulatedTime, joints, target, state, obstacles,
+                        motionSettings.targetObject);
+    };
+    recordFrame(PlannerState2D::Idle);
 
     auto sceneChanged = [&] {
         // A new or moved obstacle invalidates every previous path.
@@ -946,11 +950,9 @@ int main() {
 
     while (!WindowShouldClose()) {
         if (IsKeyPressed(KEY_SPACE)) {
+            // Pausing freezes simulated time and the follower's state together.
             paused = !paused;
             accumulator = 0.0;
-            if (paused) {
-                for (auto& joint : joints) joint.angularVelocity = 0.0;
-            }
         }
         const bool reset = IsKeyPressed(KEY_R);
         const bool selectTwo = IsKeyPressed(KEY_TWO);
@@ -989,8 +991,7 @@ int main() {
                 planningError.clear();
                 draggingTarget = false;
                 recorder.clear();
-                recorder.record(0.0, joints, target,
-                                PlannerState2D::Idle, obstacles);
+                recordFrame(PlannerState2D::Idle);
                 analysisJoint = 0;
             }
         }
@@ -1127,7 +1128,7 @@ int main() {
                     motionState.blocked ? PlannerState2D::Blocked :
                     plannedMotion.pathAvailable() ? PlannerState2D::Moving :
                     PlannerState2D::Idle;
-                recorder.record(simulatedTime, joints, target, state, obstacles);
+                recordFrame(state);
                 accumulator -= fixedDt;
             }
         }
@@ -1148,6 +1149,7 @@ int main() {
                 &recorder.at(replayIndex) : nullptr;
         const auto& displayJoints = playback ? playback->joints : joints;
         const auto& displayObstacles = playback ? playback->obstacles : obstacles;
+        const auto& displayObject = playback ? playback->targetObject : motionSettings.targetObject;
         const Vec2 displayTarget = playback ? playback->target : target;
         const auto positions = forwardKinematics(displayJoints);
         const auto jacobian = endEffectorJacobian(positions);
@@ -1160,7 +1162,8 @@ int main() {
         const double radius = displayTarget.length();
         double displayReach = 0.0;
         for (const auto& joint : displayJoints) displayReach += joint.length;
-        bool unreachable = radius > displayReach;
+        const double tolerance = motionSettings.positionTolerance;
+        bool unreachable = radius - displayReach > tolerance;
         if (displayJoints.size() == 2) {
             const double margin = motionSettings.jointClearance;
             const double innerRadius = std::hypot(displayJoints[0].length +
@@ -1171,7 +1174,8 @@ int main() {
             const double outerRadius = std::hypot(displayJoints[0].length +
                 displayJoints[1].length * std::cos(margin),
                 displayJoints[1].length * std::sin(margin));
-            unreachable = radius < innerRadius || radius > outerRadius;
+            unreachable = innerRadius - radius > tolerance ||
+                          radius - outerRadius > tolerance;
         }
 
         BeginDrawing();
@@ -1181,25 +1185,25 @@ int main() {
         BeginScissorMode(0, headerHeight, canvasWidth, height - headerHeight);
         drawScene(viewport, displayObstacles,
                   replayActive ? -1 : selectedObstacle);
-        if (!replayActive && motionSettings.targetObject)
-            drawTargetBody(viewport, displayTarget, *motionSettings.targetObject);
+        if (displayObject)
+            drawTargetBody(viewport, displayTarget, *displayObject);
         if (activeTab == 3)
             drawCollisionEnvelope(viewport, positions, displayTarget,
                                   motionSettings.obstacleClearance,
                                   motionSettings.targetClearance,
-                                  replayActive ?
-                                      std::optional<robotics::kinematics::TargetObject2D>{} :
-                                      motionSettings.targetObject);
+                                  displayObject);
         if (activeTab == 3 && !replayActive && plannedMotion.pathAvailable())
             drawJointTraces(viewport, plannedMotion.jointTraces(),
                             displayJoints, plannedMotion.finalJointAngles());
-        if (!replayActive && !draggingTarget && !reached && !planning &&
+        if (!replayActive && !draggingTarget && !reached && !planning && !stalled &&
             plannedMotion.pathAvailable())
             drawEndEffectorTrace(viewport, plannedMotion.endEffectorTrace());
+        const bool displayFailure = playback ?
+            playback->plannerState == PlannerState2D::NoPath ||
+                playback->plannerState == PlannerState2D::Blocked :
+            plannedMotion.searchFailed() || !planningError.empty() || stalled;
         drawArm(viewport, positions, displayTarget,
-                !unreachable && !(plannedMotion.searchFailed() || !planningError.empty()),
-                replayActive ? std::optional<robotics::kinematics::TargetObject2D>{} :
-                               motionSettings.targetObject);
+                !unreachable && !displayFailure, displayObject);
         EndScissorMode();
         DrawText("T Target   C Circle   B Box   V Move   DEL Remove   SPACE Pause   2-5 Presets",
                  20, height - 28, 15, muted);
@@ -1249,8 +1253,7 @@ int main() {
                     pendingPlan = true;
                     draggingTarget = false;
                     recorder.clear();
-                    recorder.record(0.0, joints, target,
-                                    PlannerState2D::Idle, obstacles);
+                    recordFrame(PlannerState2D::Idle);
                     analysisJoint = 0;
                     feedback = "Applied. SPACE to move.";
                 } catch (const std::invalid_argument& ex) {
@@ -1283,8 +1286,7 @@ int main() {
                 // timestamp collisions with an imported recording.
                 if (wasReplaying && !replayActive) {
                     recorder.clear();
-                    recorder.record(simulatedTime, joints, target,
-                                    PlannerState2D::Paused, obstacles);
+                    recordFrame(PlannerState2D::Paused);
                 }
                 paused = true;
                 accumulator = 0.0;

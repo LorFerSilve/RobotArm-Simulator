@@ -8,6 +8,7 @@
 #include <cmath>
 #include <limits>
 #include <numbers>
+#include <optional>
 #include <random>
 #include <stdexcept>
 #include <utility>
@@ -17,8 +18,16 @@ namespace {
 
 using Angles = std::vector<double>;
 constexpr double pi = std::numbers::pi;
+constexpr double fullTurn = 2.0 * pi;
 constexpr double edgeResolution = 0.04; // maximum angular displacement per check
 constexpr double searchStep = 0.32;
+
+int boundedSampleCount(double estimate, int minimum, int maximum) {
+    if (!std::isfinite(estimate)) return maximum;
+    return static_cast<int>(std::clamp(std::ceil(estimate),
+                                      static_cast<double>(minimum),
+                                      static_cast<double>(maximum)));
+}
 
 struct SearchContext {
     std::vector<Joint2D> joints;
@@ -57,14 +66,6 @@ struct SearchContext {
             settings.targetClearance;
     }
 
-    void targetDepths(std::span<const math::Vec2> points,
-                      std::span<double> depths) const {
-        if (settings.targetObject)
-            targetLinkPenetrations(points, target, *settings.targetObject, depths);
-        else
-            targetLinkPenetrations(points, target, settings.targetClearance, depths);
-    }
-
     [[nodiscard]] bool targetClear(std::span<const math::Vec2> points) const {
         return settings.targetObject ?
             targetApproachClear(points, target, *settings.targetObject) :
@@ -72,7 +73,7 @@ struct SearchContext {
     }
 
     [[nodiscard]] bool validJointAngles(const Angles& q) const {
-        if (cancelled() || q.size() != joints.size()) return false;
+        if (q.size() != joints.size()) return false;
         for (std::size_t i = 0; i < q.size(); ++i) {
             if (!std::isfinite(q[i]) || q[i] < limits[i].minAngle ||
                 q[i] > limits[i].maxAngle) return false;
@@ -125,7 +126,16 @@ struct SearchContext {
     // decreases monotonically for every link (never introduce new contact).
     // Once outside the keep-out zone, re-entry is forbidden.
     [[nodiscard]] bool edge(const Angles& a, const Angles& b) const {
-        if (!validJointAngles(a)) return false;
+        if (cancelled() || !validJointAngles(a) || !validJointAngles(b)) return false;
+        if (settings.targetObject) {
+            return sweptArmClear2D(joints, a, b, obstacles, settings.linkClearance,
+                                  settings.obstacleClearance, target,
+                                  *settings.targetObject, cancellation);
+        }
+        if (settings.targetClearance == 0.0) {
+            return sweptArmClear2D(joints, a, b, obstacles, settings.linkClearance,
+                                  settings.obstacleClearance, cancellation);
+        }
 
         // One reusable FK and two target-depth buffers per edge instead of
         // copying the robot and allocating geometry/depths at every sample.
@@ -135,13 +145,16 @@ struct SearchContext {
 
         std::vector<double> previous(joints.size());
         std::vector<double> next(joints.size());
-        targetDepths(points, previous);
+        targetLinkPenetrations(points, target, settings.targetClearance, previous);
 
         double maxDelta = 0.0;
         for (std::size_t i = 0; i < a.size(); ++i)
             maxDelta = std::max(maxDelta, std::abs(a[i] - b[i]));
-        const auto steps = std::max(
-            1, static_cast<int>(std::ceil(maxDelta / edgeResolution)));
+        constexpr int maxLegacySamples = 4096;
+        const double requiredSteps = std::ceil(maxDelta / edgeResolution);
+        if (!(requiredSteps <= maxLegacySamples)) return false;
+        const int steps = std::max(1, static_cast<int>(requiredSteps));
+        int remainingSamples = maxLegacySamples;
         Angles from = a;
         Angles to(a.size());
         Angles q(a.size());
@@ -150,12 +163,12 @@ struct SearchContext {
             if (cancelled()) return false;
             const double alpha = static_cast<double>(step) / steps;
             for (std::size_t i = 0; i < q.size(); ++i)
-                to[i] = a[i] + alpha * (b[i] - a[i]);
+                to[i] = std::lerp(a[i], b[i], alpha);
             if (!validJointAngles(to)) return false;
 
             // Bound Cartesian movement of all links between consecutive
             // samples; preserve target clearance and scene-obstacle margins.
-            int checks = 1;
+            double requiredChecks = 1.0;
             if (targetBound() > 0.0) {
                 double downstream = 0.0;
                 double maximumTravel = 0.0;
@@ -167,8 +180,8 @@ struct SearchContext {
                     targetBound() + maximumTravel) {
                     const double maxTravelPerCheck =
                         std::max(0.02, targetBound() * 0.4);
-                    checks = std::max(1, static_cast<int>(
-                        std::ceil(maximumTravel / maxTravelPerCheck)));
+                    requiredChecks = std::max(
+                        1.0, std::ceil(maximumTravel / maxTravelPerCheck));
                 }
             }
             if (!obstacles.empty()) {
@@ -177,20 +190,23 @@ struct SearchContext {
                     downstream += joints[i].length;
                     maximumTravel += downstream * std::abs(to[i] - from[i]);
                 }
-                checks = std::max(checks, std::max(1,
-                    static_cast<int>(std::ceil(maximumTravel / 0.04))));
+                requiredChecks = std::max(requiredChecks, std::ceil(maximumTravel / 0.04));
             }
 
+            // A budget limit must reject the edge, never coarsen its checks.
+            if (!(requiredChecks <= remainingSamples)) return false;
+            const int checks = static_cast<int>(requiredChecks);
+            remainingSamples -= checks;
             for (int sub = 1; sub <= checks; ++sub) {
                 if (cancelled()) return false;
                 const double fraction = static_cast<double>(sub) / checks;
                 for (std::size_t i = 0; i < q.size(); ++i)
-                    q[i] = from[i] + fraction * (to[i] - from[i]);
+                    q[i] = std::lerp(from[i], to[i], fraction);
                 if (!validJointAngles(q)) return false;
                 forwardKinematics(joints, q, points);
                 if (!collisionFreeRobot(points)) return false;
 
-                targetDepths(points, next);
+                targetLinkPenetrations(points, target, settings.targetClearance, next);
                 for (std::size_t i = 0; i < next.size(); ++i)
                     if (next[i] > previous[i] + 1e-9) return false;
                 previous.swap(next);
@@ -268,7 +284,52 @@ double distanceSquared(const Angles& a, const Angles& b) {
         }
         if (!improved) return false;
     }
-    return (target - c.positions(q).back()).length() <= c.settings.positionTolerance;
+    return !c.cancelled() &&
+        (target - c.positions(q).back()).length() <= c.settings.positionTolerance &&
+        c.valid(q);
+}
+
+struct TwoLinkPose {
+    double shoulder;
+    double elbow;
+};
+
+std::optional<TwoLinkPose> twoLinkPose(const SearchContext& c, math::Vec2 target) {
+    const double first = c.joints[0].length;
+    const double second = c.joints[1].length;
+    const auto& limit = c.limits[1];
+    const bool negative = std::signbit(c.joints[1].angle);
+    const double minBend = std::max(c.settings.jointClearance,
+                                   negative ? -limit.maxAngle : limit.minAngle);
+    const double maxBend = std::min(pi - c.settings.foldClearance,
+                                   negative ? -limit.minAngle : limit.maxAngle);
+    const auto reachAt = [first, second](double bend) {
+        return std::hypot(first + second * std::cos(bend), second * std::sin(bend));
+    };
+    const double inner = reachAt(maxBend);
+    const double outer = reachAt(minBend);
+    const double radius = target.length();
+    if (!std::isfinite(radius) || inner - radius > c.settings.positionTolerance ||
+        radius - outer > c.settings.positionTolerance)
+        return std::nullopt;
+
+    // A target just beyond the annulus can still be reached within tolerance.
+    // Use the exact joint boundary in that case to avoid rounding past it.
+    double bend = minBend;
+    if (radius <= inner) {
+        bend = maxBend;
+    } else if (radius < outer) {
+        const double scale = std::max(first, second);
+        const double a = first / scale, b = second / scale, r = radius / scale;
+        const double cosine = (r*r - a*a - b*b) / (2.0*a*b);
+        if (!std::isfinite(cosine)) return std::nullopt;
+        bend = std::clamp(std::acos(std::clamp(cosine, -1.0, 1.0)),
+                          minBend, maxBend);
+    }
+    const double elbow = negative ? -bend : bend;
+    const double shoulder = std::atan2(target.y, target.x) -
+        std::atan2(second * std::sin(elbow), first + second * std::cos(elbow));
+    return TwoLinkPose{shoulder, elbow};
 }
 
 // Prefer a Cartesian straight-line motion whenever its inverse-kinematics
@@ -279,9 +340,10 @@ double distanceSquared(const Angles& a, const Angles& b) {
     const SearchContext& c, const Angles& start, math::Vec2 target) {
     const auto origin = c.positions(start).back();
     const double distance = (target - origin).length();
-    if (distance <= c.settings.positionTolerance) return {start};
-    const int count = std::clamp(static_cast<int>(std::ceil(distance / 0.18)),
-                                 6, 28);
+    if (!std::isfinite(distance)) return {};
+    if (distance <= c.settings.positionTolerance)
+        return c.valid(start) ? std::vector<Angles>{start} : std::vector<Angles>{};
+    const int count = boundedSampleCount(distance / 0.18, 6, 28);
     std::vector<Angles> path{start};
     path.reserve(static_cast<std::size_t>(count + 1));
     Angles current = start;
@@ -292,19 +354,12 @@ double distanceSquared(const Angles& a, const Angles& b) {
             (static_cast<double>(step) / count);
         Angles next;
         if (c.joints.size() == 2) {
-            const double l1 = c.joints[0].length;
-            const double l2 = c.joints[1].length;
-            const double cosine = (nextTarget.dot(nextTarget) - l1*l1 - l2*l2) /
-                                  (2.0*l1*l2);
-            if (cosine < -1.0 - 1e-10 || cosine > 1.0 + 1e-10)
-                return {};
-            const double elbow = (std::signbit(start[1]) ? -1.0 : 1.0) *
-                std::acos(std::clamp(cosine, -1.0, 1.0));
-            const double shoulder = std::atan2(nextTarget.y, nextTarget.x) -
-                std::atan2(l2 * std::sin(elbow), l1 + l2 * std::cos(elbow));
+            const auto pose = twoLinkPose(c, nextTarget);
+            if (!pose) return {};
+            const double turn = std::round((current[0] - pose->shoulder) / fullTurn);
             double best = std::numeric_limits<double>::infinity();
-            for (int winding = -4; winding <= 4; ++winding) {
-                Angles candidate{shoulder + (2.0*pi)*winding, elbow};
+            for (int offset = -3; offset <= 3; ++offset) {
+                Angles candidate{pose->shoulder + fullTurn * (turn + offset), pose->elbow};
                 if (!c.validRobot(candidate) || !c.edge(current, candidate))
                     continue;
                 const double motion = distanceSquared(current, candidate);
@@ -371,7 +426,8 @@ struct Node {
 
 [[nodiscard]] Angles steer(const Angles& from, const Angles& to) {
     const double d = std::sqrt(distanceSquared(from, to));
-    const double scale = d > searchStep ? searchStep / d : 1.0;
+    if (d <= searchStep) return to;
+    const double scale = searchStep / d;
     Angles next(from.size());
     for (std::size_t i = 0; i < from.size(); ++i)
         next[i] = from[i] + scale * (to[i] - from[i]);
@@ -379,12 +435,18 @@ struct Node {
 }
 
 // Returns the newly added node index, or -1 if blocked.
-int extend(std::vector<Node>& tree, const Angles& target, const SearchContext& c) {
+int extend(std::vector<Node>& tree, const Angles& target, const SearchContext& c,
+           bool fromStart) {
     const int index = nearest(tree, target);
     const auto& from = tree[static_cast<std::size_t>(index)].q;
-    const Angles next = steer(from, target);
-    if (distanceSquared(from, next) < 1e-12 || !c.edge(from, next)) return -1;
-    tree.push_back({next, index});
+    auto next = steer(from, target);
+    if (distanceSquared(from, next) < 1e-12) return -1;
+    // Goal branches are traversed in reverse. Only the actual start of a
+    // plan may supply existing target contact to the retreat rule.
+    const bool safe = fromStart ? c.edge(from, next) :
+                                 c.valid(next) && c.edge(next, from);
+    if (!safe) return -1;
+    tree.push_back({std::move(next), index});
     return static_cast<int>(tree.size()) - 1;
 }
 
@@ -403,8 +465,8 @@ int extend(std::vector<Node>& tree, const Angles& target, const SearchContext& c
 // collision-checked edges; deterministic seed makes regressions reproducible.
 [[nodiscard]] std::vector<Angles> connectPath(
     const SearchContext& c, const Angles& start, const Angles& goal,
-    std::mt19937& rng) {
-    if (c.edge(start, goal)) return {start, goal};
+    std::mt19937& rng, bool tryDirect = true) {
+    if (tryDirect && c.edge(start, goal)) return {start, goal};
     std::vector<Node> fromStart{{start, -1}};
     std::vector<Node> fromGoal{{goal, -1}};
     for (int iter = 0; iter < 1800; ++iter) {
@@ -418,22 +480,28 @@ int extend(std::vector<Node>& tree, const Angles& target, const SearchContext& c
                                                          c.limits[i].maxAngle);
             sample[i] = angle(rng);
         }
-        if (iter % 9 == 0) sample = forward ? goal : start;
-        const int grown = extend(growing, sample, c);
+        // An alternative search must start with a sampled branch. Starting
+        // with goal bias would immediately recreate the already-tested edge.
+        if (iter % 9 == 0 && (tryDirect || iter != 0))
+            sample = forward ? goal : start;
+        const int grown = extend(growing, sample, c, forward);
         if (grown < 0) continue;
         const auto& destination = growing[static_cast<std::size_t>(grown)].q;
-        int matchIndex = -1;
         for (int k = 0; k < 80; ++k) {
             if (c.cancelled()) return {};
-            const int newer = extend(matching, destination, c);
+            const int newer = extend(matching, destination, c, !forward);
             if (newer < 0) break;
-            matchIndex = newer;
             const auto& endpoint = matching[static_cast<std::size_t>(newer)].q;
             if (distanceSquared(endpoint, destination) < 1e-10) {
-                auto prefix = forward ? trace(growing, grown) : trace(matching, matchIndex);
-                auto suffix = forward ? trace(matching, matchIndex) : trace(growing, grown);
+                const auto& bridgeStart = forward ? destination : endpoint;
+                const auto& bridgeEnd = forward ? endpoint : destination;
+                if (bridgeStart != bridgeEnd && !c.edge(bridgeStart, bridgeEnd))
+                    break;
+                auto prefix = forward ? trace(growing, grown) : trace(matching, newer);
+                auto suffix = forward ? trace(matching, newer) : trace(growing, grown);
                 std::reverse(suffix.begin(), suffix.end());
-                prefix.insert(prefix.end(), suffix.begin() + 1, suffix.end());
+                const auto first = bridgeStart == bridgeEnd ? suffix.begin() + 1 : suffix.begin();
+                prefix.insert(prefix.end(), first, suffix.end());
                 return prefix;
             }
         }
@@ -452,8 +520,7 @@ int extend(std::vector<Node>& tree, const Angles& target, const SearchContext& c
         distalReach += c.joints[i].length;
         travelBound += distalReach * std::abs(b[i] - a[i]);
     }
-    const int samples = std::clamp(
-        static_cast<int>(std::ceil(travelBound / 0.06)), 8, 384);
+    const int samples = boundedSampleCount(travelBound / 0.06, 8, 384);
     math::Vec2 previous = c.positions(a).back();
     double total = 0.0;
     Angles q(a.size());
@@ -547,19 +614,27 @@ int extend(std::vector<Node>& tree, const Angles& target, const SearchContext& c
     // Consecutive duplicate RRT endpoints are harmless geometrically but
     // would produce a zero denominator in the spline parameterization.
     std::vector<Angles> unique;
-    for (const auto& q : plan.waypoints) {
-        if (unique.empty() || distanceSquared(unique.back(), q) > 1e-12)
-            unique.push_back(q);
+    for (auto& q : plan.waypoints) {
+        if (unique.empty() || unique.back() != q)
+            unique.push_back(std::move(q));
     }
     plan.waypoints = std::move(unique);
     if (plan.waypoints.size() < 2) return plan;
 
     const std::size_t count = plan.waypoints.size();
     const std::size_t joints = plan.waypoints.front().size();
+    constexpr double validationResolution = 0.025;
+    constexpr int maxSplineSamples = 4096;
     plan.pathDistances.assign(count, 0.0);
-    for (std::size_t i = 1; i < count; ++i)
+    for (std::size_t i = 1; i < count; ++i) {
         plan.pathDistances[i] = plan.pathDistances[i - 1] +
             std::sqrt(distanceSquared(plan.waypoints[i - 1], plan.waypoints[i]));
+        const double span = plan.pathDistances[i] - plan.pathDistances[i - 1];
+        if (!(span > 0.0 && span <= validationResolution * maxSplineSamples)) {
+            plan.pathDistances.clear();
+            return plan;
+        }
+    }
     const double length = plan.pathDistances.back();
 
     plan.splineTangents.assign(count, Angles(joints, 0.0));
@@ -593,7 +668,7 @@ int extend(std::vector<Node>& tree, const Angles& target, const SearchContext& c
         for (std::size_t k = 0; k + 1 < count; ++k) {
             const double h = plan.pathDistances[k + 1] - plan.pathDistances[k];
             const int subdivisions = std::max(24,
-                static_cast<int>(std::ceil(h / 0.025)));
+                static_cast<int>(std::ceil(h / validationResolution)));
             Angles previous = plan.waypoints[k];
             for (int sample = 1; sample <= subdivisions; ++sample) {
                 const auto next = splinePose(
@@ -706,8 +781,7 @@ int extend(std::vector<Node>& tree, const Angles& target, const SearchContext& c
             downstreamLength += robot[j].length;
             tipTravelBound += downstreamLength * std::abs(to[j] - from[j]);
         }
-        const int samples = std::clamp(
-            static_cast<int>(std::ceil(tipTravelBound / 0.075)), 16, 512);
+        const int samples = boundedSampleCount(tipTravelBound / 0.075, 16, 512);
         for (int step = segment == 0 ? 0 : 1; step <= samples; ++step) {
             if (c.cancelled()) {
                 plan.waypoints.clear();
@@ -738,6 +812,63 @@ int extend(std::vector<Node>& tree, const Angles& target, const SearchContext& c
     return plan;
 }
 
+void validateMotionLimits(std::span<const JointLimits2D> limits,
+                          const MotionSettings2D& settings) {
+    const auto positive = [](double value) {
+        return std::isfinite(value) && value > 0.0;
+    };
+    if (!positive(settings.maxAngularSpeed) ||
+        !positive(settings.maxAngularAcceleration) ||
+        !positive(settings.maxAngularJerk))
+        throw std::invalid_argument("Invalid global motion limits");
+    for (const auto& limit : limits) {
+        if (!std::isfinite(limit.minAngle) || !std::isfinite(limit.maxAngle) ||
+            limit.minAngle >= limit.maxAngle || !positive(limit.maxAngularSpeed) ||
+            !positive(limit.maxAngularAcceleration))
+            throw std::invalid_argument("Invalid joint limits");
+    }
+}
+
+bool motionLimitsAllow(const Joint2D& before, const Joint2D& after,
+                       const JointLimits2D& limit,
+                       const MotionSettings2D& settings, double dt) {
+    const double speed = std::min(settings.maxAngularSpeed, limit.maxAngularSpeed);
+    const double acceleration = std::min(settings.maxAngularAcceleration,
+                                         limit.maxAngularAcceleration);
+    return std::abs(after.angularVelocity) <= speed + 1e-7 &&
+           std::abs(after.angularVelocity - before.angularVelocity) <= acceleration * dt + 1e-7;
+}
+
+void validatePlan(const PlannedJointPath2D& plan, math::Vec2 target) {
+    if (!std::isfinite(target.x) || !std::isfinite(target.y))
+        throw std::invalid_argument("Non-finite plan target");
+    if (!plan.found()) return;
+    const std::size_t jointCount = plan.waypoints.front().size();
+    const auto validVector = [jointCount](const Angles& vector) {
+        return vector.size() == jointCount &&
+            std::all_of(vector.begin(), vector.end(),
+                        [](double value) { return std::isfinite(value); });
+    };
+    if (jointCount < 2 ||
+        !std::all_of(plan.waypoints.begin(), plan.waypoints.end(), validVector))
+        throw std::invalid_argument("Invalid waypoint dimensions or angles");
+    if (plan.trajectoryDuration == 0.0 &&
+        plan.splineTangents.empty() && plan.pathDistances.empty())
+        return;
+    if (plan.waypoints.size() < 2 || !std::isfinite(plan.trajectoryDuration) ||
+        plan.trajectoryDuration <= 0.0 ||
+        plan.splineTangents.size() != plan.waypoints.size() ||
+        plan.pathDistances.size() != plan.waypoints.size() ||
+        plan.pathDistances.front() != 0.0 ||
+        !std::all_of(plan.splineTangents.begin(), plan.splineTangents.end(), validVector))
+        throw std::invalid_argument("Invalid trajectory duration, knots or tangents");
+    for (std::size_t i = 1; i < plan.pathDistances.size(); ++i) {
+        if (!std::isfinite(plan.pathDistances[i]) ||
+            plan.pathDistances[i] <= plan.pathDistances[i - 1])
+            throw std::invalid_argument("Trajectory knots must increase strictly");
+    }
+}
+
 void validate(const SearchContext& c, math::Vec2 target) {
     if (c.joints.size() < 2 || c.joints.size() != c.limits.size() ||
         !std::isfinite(target.x) || !std::isfinite(target.y) ||
@@ -751,16 +882,13 @@ void validate(const SearchContext& c, math::Vec2 target) {
         c.settings.targetClearance < 0.0 ||
         !std::isfinite(c.settings.obstacleClearance) ||
         c.settings.obstacleClearance < 0.0 ||
-        !std::isfinite(c.settings.maxAngularJerk) ||
-        c.settings.maxAngularJerk <= 0.0 ||
         !std::isfinite(c.settings.linkClearance) || c.settings.linkClearance < 0.0)
         throw std::invalid_argument("Planning requires >=2 joints, matching limits and finite target");
-    for (std::size_t i = 0; i < c.joints.size(); ++i) {
-        const auto& bound = c.limits[i];
-        if (!std::isfinite(c.joints[i].length) || c.joints[i].length <= 0.0 ||
-            !std::isfinite(c.joints[i].angle) ||
-            !std::isfinite(bound.minAngle) || !std::isfinite(bound.maxAngle) ||
-            bound.minAngle >= bound.maxAngle) throw std::invalid_argument("Invalid robot geometry or limits");
+    validateMotionLimits(c.limits, c.settings);
+    for (const auto& joint : c.joints) {
+        if (!std::isfinite(joint.length) || joint.length <= 0.0 ||
+            !std::isfinite(joint.angle) || !std::isfinite(joint.angularVelocity))
+            throw std::invalid_argument("Invalid robot geometry or state");
     }
     if (c.settings.targetObject &&
         (!validTargetObject2D(*c.settings.targetObject) ||
@@ -781,6 +909,7 @@ PlannedJointPath2D planJointPath2D(std::span<const Joint2D> joints,
     PlannedJointPath2D output;
     if (c.cancelled()) { output.failure = PlanningFailure2D::Cancelled; return output; }
     validate(c, target);
+    if (c.cancelled()) { output.failure = PlanningFailure2D::Cancelled; return output; }
     const Angles start = c.angles();
     // An already contacted target needs an escape path, not an immediate failure.
     output.terminalError = (target - c.positions(start).back()).length();
@@ -790,6 +919,7 @@ PlannedJointPath2D planJointPath2D(std::span<const Joint2D> joints,
     }
     double reach = 0.0;
     for (const auto& joint : joints) reach += joint.length;
+    if (!std::isfinite(reach)) throw std::overflow_error("Arm reach overflow");
     if (target.length() > reach + settings.positionTolerance) {
         output.failure = PlanningFailure2D::OutOfReach;
         return output;
@@ -805,10 +935,9 @@ PlannedJointPath2D planJointPath2D(std::span<const Joint2D> joints,
     // The base is fixed at the origin; a target containing the base can
     // never be cleared by the first link, regardless of reconfiguration.
     const bool targetCoversBase = settings.targetObject ?
-        geometry::segmentSignedDistanceToObstacle(
-            {0.0, 0.0}, {0.0, 0.0},
-            targetBody2D(*settings.targetObject, target)) <
-            settings.targetObject->clearance :
+        geometry::pointHitsObstacle({0.0, 0.0},
+            targetBody2D(*settings.targetObject, target),
+            settings.targetObject->clearance) :
         (settings.targetClearance > 0.0 &&
          target.length() < settings.targetClearance);
     if (targetCoversBase) {
@@ -823,37 +952,22 @@ PlannedJointPath2D planJointPath2D(std::span<const Joint2D> joints,
         // target, while the equivalent angle +/- 2*pi is collision-free.
         // Preserve the elbow branch (switching branches would require
         // crossing a forbidden straight/folded configuration).
-        const double l1 = joints[0].length;
-        const double l2 = joints[1].length;
-        const double radius2 = target.x * target.x + target.y * target.y;
-        const double cosine = (radius2 - l1 * l1 - l2 * l2) /
-                              (2.0 * l1 * l2);
-        if (!std::isfinite(cosine) || cosine < -1.0 - 1e-12 ||
-            cosine > 1.0 + 1e-12) {
+        const auto pose = twoLinkPose(c, target);
+        if (!pose) {
             output.failure = PlanningFailure2D::OutOfReach;
             return output;
         }
-
-        const double elbow = (std::signbit(start[1]) ? -1.0 : 1.0) *
-                             std::acos(std::clamp(cosine, -1.0, 1.0));
-        if (elbow < limits[1].minAngle - 1e-9 ||
-            elbow > limits[1].maxAngle + 1e-9 ||
-            std::abs(elbow) < settings.jointClearance - 1e-9 ||
-            std::abs(elbow) > pi - settings.foldClearance + 1e-9) {
-            output.failure = PlanningFailure2D::OutOfReach;
-            return output;
-        }
-        const double shoulder = std::atan2(target.y, target.x) -
-                                std::atan2(l2 * std::sin(elbow),
-                                           l1 + l2 * std::cos(elbow));
-        constexpr double fullTurn = 2.0 * pi;
-        const double nearestTurn = std::round((start[0] - shoulder) / fullTurn);
+        const double nearestTurn = std::round((start[0] - pose->shoulder) / fullTurn);
 
         std::vector<Angles> goals;
         for (int offset = -3; offset <= 3; ++offset) {
-            const double angle = shoulder + (nearestTurn + offset) * fullTurn;
-            Angles candidate{angle, elbow};
-            if (c.valid(candidate)) goals.push_back(std::move(candidate));
+            const double angle = pose->shoulder + (nearestTurn + offset) * fullTurn;
+            const double shoulder = std::clamp(angle, limits[0].minAngle, limits[0].maxAngle);
+            Angles candidate{shoulder, pose->elbow};
+            if (c.valid(candidate) &&
+                (target - c.positions(candidate).back()).length() <= settings.positionTolerance &&
+                std::find(goals.begin(), goals.end(), candidate) == goals.end())
+                goals.push_back(std::move(candidate));
         }
         std::sort(goals.begin(), goals.end(),
                   [&](const Angles& a, const Angles& b) {
@@ -866,19 +980,24 @@ PlannedJointPath2D planJointPath2D(std::span<const Joint2D> joints,
         // priority over the broad arc of one joint-space interpolation.
         PlannedJointPath2D best;
         double bestDistance = std::numeric_limits<double>::infinity();
+        std::vector<std::vector<Angles>> comparedPaths;
         const auto consider = [&](std::vector<Angles> path) {
-            if (path.empty() || c.cancelled()) return;
+            if (path.empty() || c.cancelled() ||
+                std::find(comparedPaths.begin(), comparedPaths.end(), path) != comparedPaths.end())
+                return false;
+            comparedPaths.push_back(path);
             PlannedJointPath2D candidate;
             candidate.waypoints = std::move(path);
             candidate.terminalError =
                 (target - c.positions(candidate.waypoints.back()).back()).length();
             candidate = withEndEffectorTrace(
                 c, prepareTrajectory(c, std::move(candidate)));
-            if (candidate.found() &&
-                candidate.endEffectorDistance < bestDistance) {
+            if (!candidate.found()) return false;
+            if (candidate.endEffectorDistance < bestDistance) {
                 bestDistance = candidate.endEffectorDistance;
                 best = std::move(candidate);
             }
+            return true;
         };
         consider(cartesianGuidedPath(c, start, target));
         for (const auto& goal : goals) {
@@ -889,7 +1008,7 @@ PlannedJointPath2D planJointPath2D(std::span<const Joint2D> joints,
         // In a free scene, the existing direct/Cartesian choice is sufficient.
         // With obstacles, a valid direct joint-space edge may still trace a
         // wide Cartesian arc; compare it with a few safe RRT alternatives.
-        if (best.found() &&
+        if (!c.cancelled() && best.found() &&
             (obstacles.empty() || bestDistance <= directLowerBound * 1.03))
             return best;
 
@@ -901,10 +1020,9 @@ PlannedJointPath2D planJointPath2D(std::span<const Joint2D> joints,
                 if (c.cancelled() || candidates >= maxRrtCandidates ||
                     (best.found() && bestDistance <= directLowerBound * 1.03))
                     break;
-                const auto path = connectPath(c, start, goal, rng);
+                auto path = connectPath(c, start, goal, rng, false);
                 if (path.empty()) continue;
-                ++candidates;
-                consider(shorten(c, path));
+                if (consider(shorten(c, std::move(path)))) ++candidates;
             }
             if (c.cancelled() || candidates >= maxRrtCandidates ||
                 (best.found() && bestDistance <= directLowerBound * 1.03))
@@ -1010,6 +1128,8 @@ const char* planningFailureMessage(PlanningFailure2D reason) noexcept {
     case PlanningFailure2D::NoIKSolution: return "NO VALID IK SOLUTION";
     case PlanningFailure2D::PathSearchExhausted: return "SEARCH BUDGET EXHAUSTED";
     case PlanningFailure2D::TargetBlockedByJointLimits: return "TARGET BLOCKS SHOULDER ROTATION";
+    case PlanningFailure2D::MotionLimitExceeded: return "MOTION LIMIT EXCEEDED";
+    case PlanningFailure2D::UnsafeMotionStep: return "UNSAFE MOTION STEP";
     }
     return "UNKNOWN PLANNING STATUS";
 }
@@ -1032,6 +1152,7 @@ void PlannedMotion2D::reset() noexcept {
 }
 
 void PlannedMotion2D::usePlan(PlannedJointPath2D plan, math::Vec2 target) {
+    validatePlan(plan, target);
     target_ = target;
     hasTarget_ = true;
     failed_ = !plan.found();
@@ -1060,20 +1181,42 @@ MotionStatus2D PlannedMotion2D::advance(std::span<Joint2D> joints,
                                         std::span<const JointLimits2D> limits,
                                         double dt, const MotionSettings2D& settings,
                                         std::span<const geometry::Obstacle2D> obstacles) {
-    if (!hasTarget_ || joints.size() != limits.size() || !std::isfinite(dt) ||
+    if (!hasTarget_ || joints.size() < 2 || joints.size() != limits.size() || !std::isfinite(dt) ||
         dt <= 0.0 || dt > 0.1)
         throw std::invalid_argument("Follower requires target, joint limits and valid timestep");
+    validateMotionLimits(limits, settings);
+    if (!path_.empty()) {
+        if (joints.size() != path_.front().size())
+            throw std::invalid_argument("Plan joint count does not match the arm");
+        if (index_ <= 1 && segmentElapsed_ == 0.0 && trajectoryElapsed_ == 0.0) {
+            for (std::size_t i = 0; i < joints.size(); ++i)
+                if (joints[i].angle != path_.front()[i])
+                    throw std::invalid_argument("Plan start pose does not match the arm");
+        }
+    }
 
     MotionStatus2D status;
     status.positionError = (target_ - forwardKinematics(joints).back()).length();
+    const auto blockStep = [&](PlanningFailure2D reason) {
+        failed_ = true;
+        failure_ = reason;
+        status.blocked = true;
+        status.constrained = true;
+        for (auto& joint : joints) joint.angularVelocity = 0.0;
+        return status;
+    };
     status.blocked = failed_;
     if (failed_) {
+        status.constrained = !path_.empty();
         for (auto& joint : joints) joint.angularVelocity = 0.0;
         return status;
     }
 
     if (path_.empty()) return status;
+    const SearchContext context(joints, limits, settings, target_, obstacles);
     if (index_ >= path_.size() || path_.size() == 1) {
+        if (!context.valid(context.angles()))
+            return blockStep(PlanningFailure2D::UnsafeMotionStep);
         status.reached = status.positionError <= settings.positionTolerance;
         return status;
     }
@@ -1104,29 +1247,11 @@ MotionStatus2D PlannedMotion2D::advance(std::span<Joint2D> joints,
             proposed[j].angle = q[j];
             proposed[j].angularVelocity = atGoal ? 0.0 :
                 (q[j] - joints[j].angle) / dt;
-            const double speed = std::min(settings.maxAngularSpeed,
-                                          limits[j].maxAngularSpeed);
-            const double acceleration =
-                std::min(settings.maxAngularAcceleration,
-                         limits[j].maxAngularAcceleration);
-            if (std::abs(proposed[j].angularVelocity) > speed + 1e-7 ||
-                std::abs(proposed[j].angularVelocity -
-                         joints[j].angularVelocity) > acceleration * dt + 1e-7) {
-                failed_ = true;
-                status.blocked = true;
-                status.constrained = true;
-                for (auto& joint : joints) joint.angularVelocity = 0.0;
-                return status;
-            }
+            if (!motionLimitsAllow(joints[j], proposed[j], limits[j], settings, dt))
+                return blockStep(PlanningFailure2D::MotionLimitExceeded);
         }
-        SearchContext context(joints, limits, settings, target_, obstacles);
-        if (!context.edge(context.angles(), q)) {
-            failed_ = true;
-            status.blocked = true;
-            status.constrained = true;
-            for (auto& joint : joints) joint.angularVelocity = 0.0;
-            return status;
-        }
+        if ((atGoal && !context.valid(q)) || !context.edge(context.angles(), q))
+            return blockStep(PlanningFailure2D::UnsafeMotionStep);
         std::copy(proposed.begin(), proposed.end(), joints.begin());
         trajectoryElapsed_ = elapsed;
         status.positionError = (target_ - forwardKinematics(joints).back()).length();
@@ -1142,26 +1267,26 @@ MotionStatus2D PlannedMotion2D::advance(std::span<Joint2D> joints,
     // waypoint. A quintic smoothstep has zero endpoint speed/acceleration.
     const auto& a = path_[index_ - 1];
     const auto& b = path_[index_];
-    if (segmentDuration_ == 0.0) {
-        segmentDuration_ = 2.0 * dt;
-        for (std::size_t i = 0; i < joints.size(); ++i) {
-            const double distance = std::abs(b[i] - a[i]);
-            if (distance == 0.0) continue;
-            const double maxSpeed = std::min(settings.maxAngularSpeed,
-                                              limits[i].maxAngularSpeed);
-            const double maxAcceleration = std::min(settings.maxAngularAcceleration,
-                                                     limits[i].maxAngularAcceleration);
-            if (!std::isfinite(maxSpeed) || maxSpeed <= 0.0 ||
-                !std::isfinite(maxAcceleration) || maxAcceleration <= 0.0)
-                throw std::invalid_argument("Invalid joint motion limits");
-            // |s'(u)| <= 1.875 and |s''(u)| <= 5.774 for quintic smoothstep.
-            // Factor 8 accounts for finite-difference acceleration at 60 Hz,
-            // including the final timestep that settles at zero velocity.
-            segmentDuration_ = std::max(segmentDuration_,
-                std::max(1.875 * distance / maxSpeed,
-                         std::sqrt(8.0 * distance / maxAcceleration)));
-        }
+    double requiredDuration = 0.0;
+    for (std::size_t i = 0; i < joints.size(); ++i) {
+        const double distance = std::abs(b[i] - a[i]);
+        const double speed = std::min(settings.maxAngularSpeed, limits[i].maxAngularSpeed);
+        const double acceleration = std::min(settings.maxAngularAcceleration,
+                                             limits[i].maxAngularAcceleration);
+        // The quintic smoothstep peaks at 1.875 in speed and 60 in jerk.
+        // Factor 8 covers acceleration estimated from consecutive steps.
+        requiredDuration = std::max({
+            requiredDuration, 1.875 * distance / speed,
+            std::sqrt(8.0 * distance / acceleration),
+            std::cbrt(60.0 * distance / settings.maxAngularJerk)
+        });
     }
+    if (!std::isfinite(requiredDuration))
+        return blockStep(PlanningFailure2D::MotionLimitExceeded);
+    if (segmentDuration_ == 0.0)
+        segmentDuration_ = std::max(requiredDuration, 2.0 * dt);
+    else if (requiredDuration > segmentDuration_)
+        return blockStep(PlanningFailure2D::MotionLimitExceeded);
 
     const double nextElapsed = std::min(segmentDuration_, segmentElapsed_ + dt);
     const double u = nextElapsed / segmentDuration_;
@@ -1171,22 +1296,18 @@ MotionStatus2D PlannedMotion2D::advance(std::span<Joint2D> joints,
     std::vector<Joint2D> candidate(joints.begin(), joints.end());
     Angles candidateAngles(joints.size());
     for (std::size_t i = 0; i < joints.size(); ++i) {
-        candidate[i].angle = a[i] + (b[i] - a[i]) * progress;
+        candidate[i].angle = std::lerp(a[i], b[i], progress);
         candidate[i].angularVelocity = atWaypoint ? 0.0 :
             (candidate[i].angle - joints[i].angle) / dt;
         candidateAngles[i] = candidate[i].angle;
+        if (!motionLimitsAllow(joints[i], candidate[i], limits[i], settings, dt))
+            return blockStep(PlanningFailure2D::MotionLimitExceeded);
     }
 
-    SearchContext context(joints, limits, settings, target_, obstacles);
-    if (!context.edge(context.angles(), candidateAngles)) {
-        // Fail closed if numeric precision or changed constraints invalidate
-        // a path segment. Do not take an unvalidated shortcut.
-        failed_ = true;
-        status.blocked = true;
-        status.constrained = true;
-        for (auto& joint : joints) joint.angularVelocity = 0.0;
-        return status;
-    }
+    const bool finalPose = atWaypoint && index_ + 1 == path_.size();
+    if ((finalPose && !context.valid(candidateAngles)) ||
+        !context.edge(context.angles(), candidateAngles))
+        return blockStep(PlanningFailure2D::UnsafeMotionStep);
 
     std::copy(candidate.begin(), candidate.end(), joints.begin());
     segmentElapsed_ = nextElapsed;

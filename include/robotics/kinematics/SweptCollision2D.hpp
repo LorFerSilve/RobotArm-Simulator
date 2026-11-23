@@ -2,6 +2,7 @@
 
 #include "robotics/geometry/Obstacles2D.hpp"
 #include "robotics/kinematics/Joint2D.hpp"
+#include "robotics/kinematics/TargetObject2D.hpp"
 
 #include <span>
 #include <stop_token>
@@ -19,8 +20,8 @@ namespace robotics::kinematics {
 // be certified within the recursion limit. That failure is conservative:
 // it does not prove a collision or that no alternate route exists.
 //
-// Does not model target/tool contact or curved spline arcs; the planner's
-// target-specific approach rules and spline-edge sampling remain separate.
+// This overload checks scene and self-contact. Neither overload certifies
+// curved spline arcs.
 [[nodiscard]] bool sweptArmClear2D(
     std::span<const Joint2D> joints,
     std::span<const double> startAngles,
@@ -28,6 +29,20 @@ namespace robotics::kinematics {
     std::span<const geometry::Obstacle2D> obstacles,
     double selfClearance,
     double obstacleClearance,
+    std::stop_token cancellation = {});
+
+// Also certifies the explicit target against every protected shaft segment.
+// Only the distal tool section is exempt. A shaft already in contact may
+// retreat while its penetration is nonincreasing and must not re-enter.
+[[nodiscard]] bool sweptArmClear2D(
+    std::span<const Joint2D> joints,
+    std::span<const double> startAngles,
+    std::span<const double> endAngles,
+    std::span<const geometry::Obstacle2D> obstacles,
+    double selfClearance,
+    double obstacleClearance,
+    math::Vec2 target,
+    const TargetObject2D& targetObject,
     std::stop_token cancellation = {});
 
 } // namespace robotics::kinematics

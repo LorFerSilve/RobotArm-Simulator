@@ -1,6 +1,7 @@
 #include "robotics/geometry/Obstacles2D.hpp"
 #include "robotics/kinematics/ForwardKinematics.hpp"
 #include "robotics/kinematics/PathPlanning2D.hpp"
+#include "robotics/kinematics/SweptCollision2D.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -14,10 +15,12 @@ using robotics::geometry::Obstacle2D;
 using robotics::geometry::hasObstacleCollision;
 using robotics::kinematics::Joint2D;
 using robotics::kinematics::JointLimits2D;
+using robotics::kinematics::MotionSettings2D;
 using robotics::kinematics::PlannedJointPath2D;
 using robotics::kinematics::PlannedMotion2D;
 using robotics::kinematics::forwardKinematics;
 using robotics::kinematics::planJointPath2D;
+using robotics::kinematics::sweptArmClear2D;
 using robotics::math::Vec2;
 
 namespace {
@@ -39,16 +42,18 @@ void followScene(std::vector<Joint2D> joints,
                  const std::vector<JointLimits2D>& limits,
                  Vec2 target,
                  const std::vector<Obstacle2D>& obstacles,
-                 const PlannedJointPath2D& plan) {
+                 const PlannedJointPath2D& plan,
+                 const MotionSettings2D& settings = {}) {
     PlannedMotion2D motion;
     motion.usePlan(plan, target);
     bool reached = false;
     constexpr double dt = 1.0 / 60.0;
     for (int frame = 0; frame < 3000; ++frame) {
         const auto old = joints;
-        const auto status = motion.advance(joints, limits, dt, {}, obstacles);
+        const auto status = motion.advance(joints, limits, dt, settings, obstacles);
         require(!status.blocked, "Optimized scene trajectory blocked");
-        require(!hasObstacleCollision(forwardKinematics(joints), obstacles, 0.10),
+        require(!hasObstacleCollision(forwardKinematics(joints), obstacles,
+                                      settings.obstacleClearance),
                 "Optimized scene trajectory touched an obstacle");
         for (std::size_t i = 0; i < joints.size(); ++i) {
             require(joints[i].angle >= limits[i].minAngle - 1e-8 &&
@@ -151,6 +156,43 @@ int main() {
                 "Redundant-arm travel metric must match the preview");
         followScene(redundant, bounds, blockedStraightTarget, anotherScene,
                     alternative);
+
+        // The direct edge is safe, but the obstacle blocks the straight
+        // Cartesian lift. The shoulder limits allow only one IK winding.
+        // Repeating that edge as an RRT alternative misses a shorter path.
+        const std::vector<double> from{0.0789975233, -0.2339312208};
+        const std::vector<double> to{0.2695424112, -2.2420678704};
+        const std::vector<Joint2D> singleWinding{{2.0, from[0]}, {1.0, from[1]}};
+        const std::vector<JointLimits2D> oneWindingLimits{
+            {from[0] - 0.26, to[0] + 0.26, 2, 6}, {-2.65, -0.16, 2, 6}
+        };
+        const std::vector<Obstacle2D> shortScene{
+            Circle2D{{2.2406629905, 0.2802591308}, 0.0527970114}
+        };
+        MotionSettings2D narrow;
+        narrow.obstacleClearance = 0.015;
+        require(sweptArmClear2D(singleWinding, from, to, shortScene,
+                                 narrow.linkClearance, narrow.obstacleClearance),
+                "The direct edge must be continuously scene-clear");
+        std::vector<Vec2> pose;
+        forwardKinematics(singleWinding, from, pose);
+        Vec2 prior = pose.back();
+        double directTravel = 0.0;
+        for (int i = 1; i <= 300; ++i) {
+            const double t = i / 300.0;
+            const std::vector<double> q{
+                std::lerp(from[0], to[0], t), std::lerp(from[1], to[1], t)
+            };
+            forwardKinematics(singleWinding, q, pose);
+            directTravel += (pose.back() - prior).length();
+            prior = pose.back();
+        }
+        const auto nearby = planJointPath2D(singleWinding, oneWindingLimits,
+                                             prior, narrow, shortScene);
+        require(nearby.waypoints.size() > 2 &&
+                    nearby.endEffectorDistance < directTravel - 0.02,
+                "An RRT alternative must improve on the safe direct edge");
+        followScene(singleWinding, oneWindingLimits, prior, shortScene, nearby, narrow);
 
         std::cout << "Two-link safe reference tip travel: " << baseline
                   << " m; selected optimized travel: "

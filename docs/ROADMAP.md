@@ -81,7 +81,7 @@ completeness and real-time replanning are not yet guaranteed.
       link/target collision envelopes. These overlays are diagnostic only,
       not mathematically certified continuous collision detection.
 - [x] Support reproducible recording/replay of joint positions, velocities,
-      target and static obstacle scene with a versioned text file. The viewer
+      target geometry, tool contact length and static obstacles. The viewer
       replays stored frames and never recomputes a planner solution.
 - [ ] Consider optional full-session/unbounded capture for long experiments
       if the current rolling 60-second recording proves insufficient.
@@ -105,8 +105,8 @@ milestones before generalizing spatial representations.
       rectangle), configurable shaft clearance and physical terminal
       tool-contact length. Integrate the geometry with planning/follower
       safety and the SCENE editor. Keep old APIs available for compatibility.
-- [ ] Extend continuous safety certification to target-object approach,
-      including the special case of safe retreat from initial contact.
+- [x] Certify continuous target-object approach and retreat along linear
+      joint-space edges, with separate shaft and tool-contact geometry.
 - [ ] Support custom link radii where needed, with one consistent
       clearance convention in planning, execution and visualization.
 - [ ] Add adversarial checks near tangencies and narrow passages; keep
@@ -158,9 +158,9 @@ milestones before generalizing spatial representations.
 - [x] **Target-object geometry, first implementation:** circle/rectangle
       bodies with adjustable size and shaft margin; explicitly sized terminal
       tool contact section (instead of an implicit proportion of target size).
-- [ ] **Target-object continuous safety:** certify swept approach/contact
-      for the whole target body, including initial-contact retreat. Current
-      target-specific checks still use discretized penetration profiles.
+- [x] **Target-object continuous safety on linear edges:** protect the
+      shaft against circles and rectangles, including retreat from existing
+      contact and rejection of re-entry. The legacy radius uses sampled checks.
 - [ ] **Approach direction:** define the desired tool-facing orientation
       when orientation/pose targets are added in 2D-D.
 - [x] **Target-under-arm recovery (initial implementation):** multi-start IK
@@ -187,8 +187,8 @@ milestones before generalizing spatial representations.
 - [x] Add conservative continuous interval certification for **static
       scene obstacles and nonadjacent-link contact** on linear joint-space
       edges (2D-A). It rejects intervals it cannot certify.
-- [ ] Extend that certification to target-object and tool contact:
-      target approach currently uses sampling and a short tip exception.
+- [x] Apply the linear certificate to explicit targets and test both
+      certified retreat and a grazing collision between clear samples.
 - [ ] Support arbitrary curved swept-volume trajectories and moving
       obstacles before making real-world collision-safety claims.
 

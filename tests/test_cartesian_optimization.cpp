@@ -133,6 +133,20 @@ int main() {
                 tooClose.failure == PlanningFailure2D::OutOfReach,
                 "Inner-workspace exclusion should be diagnosed as unreachable");
 
+        const std::vector<Joint2D> bounded{{1.0, 0.5}, {1.0, -1.0}};
+        const std::vector<JointLimits2D> boundedLimits{
+            {-1.0, 1.0, 2.0, 6.0}, {-2.4, -0.5, 2.0, 6.0}
+        };
+        const double outer = 2.0 * std::cos(0.25);
+        const Vec2 nearBoundary{outer + 0.002, 0.0};
+        const auto withinTolerance = planJointPath2D(bounded, boundedLimits, nearBoundary);
+        require(withinTolerance.found() && withinTolerance.terminalError <= 0.005 &&
+                    withinTolerance.waypoints.back()[1] <= -0.5,
+                "A goal within tolerance must be reachable at the legal elbow boundary");
+        const auto outside = planJointPath2D(bounded, boundedLimits, {outer + 0.006, 0.0});
+        require(!outside.found() && outside.failure == PlanningFailure2D::OutOfReach,
+                "Outside workspace and tolerance must still be rejected");
+
         std::cout << "Cartesian distance optimization and target barrier tests passed\n";
     } catch (const std::exception& ex) {
         std::cerr << "FAILED: " << ex.what() << '\n';

@@ -128,6 +128,12 @@ int main() {
         require(alreadyThere.found() &&
                 alreadyThere.endEffectorTrace.size() == 1,
                 "An already-reached goal has no movement to preview");
+
+        const std::vector<Joint2D> largeArm{{2e12, pi/2}, {1e12, -pi/2}};
+        const auto largeTrace = planJointPath2D(largeArm, limits, {1.5e12, 1.5e12});
+        require(largeTrace.found() && largeTrace.endEffectorTrace.size() >= 513 &&
+                    std::isfinite(largeTrace.endEffectorDistance),
+                "Large Cartesian distances must be capped before integer conversion");
         std::cout << "End-effector trajectory preview passed\n";
     } catch (const std::exception& error) {
         std::cerr << "FAILED: " << error.what() << '\n';

@@ -57,13 +57,14 @@ private:
 
     mutable std::mutex mutex_;
     std::condition_variable ready_;
-    std::jthread worker_;
     std::optional<Request> pending_;
     std::optional<AsyncPlanResult2D> completed_;
     std::stop_source cancelCurrent_;
     std::uint64_t requestId_{};
     bool busy_{};
     bool closing_{};
+    // The worker can enter run() as soon as its constructor starts it.
+    std::jthread worker_;
 };
 
 } // namespace robotics::kinematics

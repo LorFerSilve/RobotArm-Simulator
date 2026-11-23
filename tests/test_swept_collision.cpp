@@ -1,5 +1,6 @@
 #include "robotics/geometry/Obstacles2D.hpp"
 #include "robotics/kinematics/ForwardKinematics.hpp"
+#include "robotics/kinematics/SmoothMotion2D.hpp"
 #include "robotics/kinematics/SweptCollision2D.hpp"
 
 #include <algorithm>
@@ -15,6 +16,7 @@ using robotics::geometry::Obstacle2D;
 using robotics::geometry::hasObstacleCollision;
 using robotics::kinematics::Joint2D;
 using robotics::kinematics::forwardKinematics;
+using robotics::kinematics::hasSelfCollision;
 using robotics::kinematics::sweptArmClear2D;
 using robotics::math::Vec2;
 
@@ -60,6 +62,14 @@ int main() {
         require(sweptArmClear2D(arm, start, end, {}, 0.1, 0.1),
                 "Two-link motion without static obstacles is self-safe");
 
+        const std::vector<Joint2D> longLink{{1e155, 0.0}};
+        const std::vector<double> fixed{0.0};
+        const std::vector<Obstacle2D> acrossLongLink{
+            Circle2D{{5e154, 0.0}, 1e145}
+        };
+        require(!sweptArmClear2D(longLink, fixed, fixed, acrossLongLink, 0.0, 0.0),
+                "Overflow of a squared length must not hide a scene collision");
+
         // In four-link arms, a straight joint-space interpolation may
         // self-intersect even if its initial and terminal poses are safe.
         const std::vector<Joint2D> four{
@@ -83,6 +93,27 @@ int main() {
         require(!sweptArmClear2D(
                     four, selfStart, selfEnd, {}, 0.1, 0.1),
                 "Intermediate self-intersection must reject full edge");
+
+        // The first and fourth links cross at (scale, 0). A fixed threshold
+        // on the cross product used to mistake the short links for parallels.
+        const std::vector<double> crossedAngles{0.0, pi/2, pi/2, pi/2};
+        for (const double scale : {1e-80, 1e-7, 1.0, 1e70}) {
+            const std::vector<Joint2D> crossed{
+                {4 * scale, 0.0}, {3 * scale, pi/2},
+                {3 * scale, pi/2}, {5 * scale, pi/2}
+            };
+            require(hasSelfCollision(forwardKinematics(crossed), 0.0),
+                    "A crossing must count as self-contact at every scale");
+            require(!sweptArmClear2D(crossed, crossedAngles, crossedAngles,
+                                     {}, 0.0, 0.0),
+                    "A crossed start pose must never be certified clear");
+            const std::vector<Vec2> separated{
+                {0, 0}, {4 * scale, 0}, {4 * scale, 3 * scale},
+                {1 * scale, 3 * scale}, {1 * scale, 2 * scale}
+            };
+            require(!hasSelfCollision(separated, scale),
+                    "Separated short links must still have positive clearance");
+        }
 
         // Checks must be cancellation-aware and must reject bad geometry,
         // without depending on raylib or a real GUI session.
