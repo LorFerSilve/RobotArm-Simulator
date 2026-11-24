@@ -9,7 +9,7 @@ A modular C++20 robotic arm simulator featuring custom kinematics, Jacobian-base
 - Analytic 2 x N Jacobian, Cartesian end-effector velocity, and 2-joint determinant.
 - Custom damped least-squares inverse kinematics, velocity limiting, and target tolerance.
 - Collision-aware GUI motion: analytic two-link IK with a stable elbow branch, angular speed/acceleration caps, joint clearance, nonadjacent-link collision checks, and extra target-object/folding safeguards.
-- CLI frame telemetry and 28 automatic tests using CTest.
+- CLI frame telemetry and 29 automatic tests using CTest.
 - Interactive 2D GUI, using raylib **only** for display and input: target selection by mouse, real-time telemetry, pause/reset, grid and zoom.
 - **Configurable robot arm (Phase 1):** edit each link's length and radius, initial joint angle, rotation range, maximum speed and maximum acceleration for 2–6 joints in the GUI.
 
@@ -50,8 +50,10 @@ The GUI uses 60 Hz fixed-step simulation and a 60 FPS rendering target. Renderin
 
 | Input | Function |
 | --- | --- |
-| Left click/drag within the canvas | Set the end-effector target (metres); safe joint-space motion is planned on mouse release for all arms |
+| Left click/drag within the canvas | Brake the active motion and choose a target. The physical target moves on release, and planning starts from rest |
 | `Space` | Freeze or resume the simulation clock and motion state |
+| `X` | Cancel the active goal and bring the arm to a controlled stop |
+| `E` | Hold the current pose immediately. Select a target or reset to resume motion |
 | `R` | Reset to initial pose and target |
 | `2` | Two-joint robot preset |
 | `3` | Three-joint robot preset |
@@ -68,8 +70,8 @@ The right panel shows target and tip coordinates, Cartesian speed, goal error, s
 The two-link planner preserves the elbow branch. A geometrically reachable
 pose within the position tolerance is accepted if it meets the joint and
 collision constraints. The bounded search reports **NO SAFE PATH FOUND**
-if it cannot find a route. **BLOCKED** identifies a step rejected during
-execution.
+if it cannot find a route. **EMERGENCY STOP** identifies an execution
+step that was rejected or a manual emergency stop.
 
 ## Math and IK conventions
 
@@ -310,10 +312,9 @@ margin in centreline queries.
 The collision functions support circular and rectangular solids, with
 Euclidean clearances (not only axis-aligned bounding boxes).
 
-Changing the geometry immediately invalidates the old path. The follower
-certifies each linear joint-space step against the current static scene.
-Moving obstacles and continuous certification of curved spline arcs remain
-open.
+Changing scene geometry invalidates the old path and invokes an emergency
+stop. The follower certifies linear steps and bounded spline arcs against
+the current static scene.
 
 The new `Obstacles2D` CTest checks geometry, clearances, impossible targets,
 invalid starting configurations, the planner and the actual follower.
@@ -329,7 +330,7 @@ run. A new mouse target, obstacle edit, robot preset or reset cancels the
 previous search; outdated results are never installed.
 
 The planner reports differentiated statuses: `OUT OF REACH`, `TARGET
-BLOCKED`, `NO VALID IK SOLUTION`, `SEARCH BUDGET EXHAUSTED`, and
+BLOCKED`, `NO VALID IK SOLUTION`, `PATH SEARCH BUDGET EXHAUSTED`, and
 `PLANNING CANCELLED`. Failed searches still stop safely rather than
 moving the robot through the target or another arm link.
 
@@ -348,21 +349,28 @@ so angles, angular velocity and angular acceleration are continuous
 The global duration is sized from per-joint speed, acceleration, and a
 global jerk bound (default 120 rad/s³) with conservative numerical margins.
 
-The smoothed path is checked against the **same** joint constraints,
-self-collisions, target-object clearance, and scene obstacles as the
-original polyline. If rounding a corner would cause contact, the tangent
-is set to zero at that corner and the robot makes a safe stop there.
-Thus smoothing is *opportunistic*, never a bypass for collision rules.
-If a complete smoothed profile cannot be validated due to geometry or
-floating-point differences, the original collision-checked waypoint
-follower remains available as a fallback. The quintic fallback also
-applies the configured jerk bound. Spline validation certifies the
-linear chords between samples, and execution certifies its linear
-steps. A continuous certificate for the spline itself remains open.
+An interval's quintic Bézier controls bound its joint angles and the
+maximum displacement of each link from the midpoint. That bound certifies
+the **entire arc** against static scene obstacles, self-contact and target
+shaft contact. Planning and execution subdivide intervals when the margins
+are inconclusive. The planner tries up to three tangent reductions at a
+corner before using a rest-to-rest segment. Such a segment follows its
+original joint-space line and can use the linear explicit-target retreat
+check. The legacy radius-only retreat still uses its sampled check.
+
+A goal change or **X** slows the active trajectory's clock smoothly,
+preserving the current position, velocity and acceleration at the switch.
+Braking follows the same path and revalidates clearance at every step.
+The planner uses the stopped pose for the latest committed goal. **E**
+or a rejected execution step holds the pose immediately and cancels
+automatic continuation. **Space** freezes the simulation clock, including
+any brake in progress.
 
 The GUI prepares this trajectory on the asynchronous worker, so smoothing
-itself does not interrupt rendering. The `SmoothTrajectory2D` CTest
-verifies coordinated time-stepped arrival and motion limits.
+itself does not interrupt rendering. `SmoothTrajectory2D` verifies
+coordinated arrival and motion limits. `MotionTransitions2D` verifies
+retargeting with nonzero acceleration, both stop modes and an intermediate
+collision on a curved arc whose endpoint chord is clear.
 
 ## Phase 3 — Obstacle-aware IK goal search
 
@@ -534,9 +542,10 @@ Press **EXIT** to leave replay mode; returning to the live simulator
 remains paused and requires **Space** to plan and resume. Replay never
 executes IK/RRT or changes live robot geometry.
 
-The `.rarm` file is a versioned, dependency-free text format. Version 4
-preserves per-link radii, target shape, dimensions, shaft clearance and
-tool length. Versions 2 and 3 remain readable and use centreline links.
+The `.rarm` file is a versioned, dependency-free text format. Version 5
+preserves the braking, controlled stop and emergency stop states along
+with per-link radii and target geometry. The reader also accepts versions
+2 through 4. Versions 2 and 3 use centreline links.
 A malformed file leaves the previous session intact. Git ignores the
 GUI's session file.
 
@@ -551,8 +560,8 @@ remains part of CI.
 
 `sweptArmClear2D()` conservatively validates the full linear joint-space
 interpolation against static circle and rectangle obstacles, nonadjacent
-links and explicit targets. The planner, follower and spline chord checks
-all use the same edge validator.
+links and explicit targets. The planner and follower use this certificate
+for linear motion, including rest-to-rest spline segments.
 
 Unlike a fixed number of discrete collision samples, this check derives
 a bound on the maximum displacement of any link endpoint during a time

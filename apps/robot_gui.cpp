@@ -25,6 +25,7 @@
 namespace {
 
 using robotics::kinematics::Joint2D;
+using robotics::kinematics::MotionStop2D;
 using robotics::math::Vec2;
 
 constexpr int initialWidth = 1260;
@@ -671,7 +672,10 @@ void drawTelemetryGraph(int x, int y, int w, int h,
         DrawText("SINGULAR / UNAVAILABLE", x + 30, y + h/2, 14, orange);
         return;
     }
-    if (metric == PlotMetric::Planner) { lowest = 0.0; highest = 6.0; }
+    if (metric == PlotMetric::Planner) {
+        lowest = 0.0;
+        highest = static_cast<double>(PlannerState2D::EmergencyStop);
+    }
     else if (highest - lowest < 1e-8) {
         lowest -= 1.0;
         highest += 1.0;
@@ -811,7 +815,7 @@ void drawSidebar(int screenWidth, int height, const std::vector<Joint2D>& joints
                  Vec2 target, Vec2 endEffector, Vec2 tipVelocity,
                  double error, double elapsed, bool paused,
                  bool reached, bool stalled, bool constrained, bool unreachable,
-                 bool noPath, bool planning, const char* failureReason,
+                 bool noPath, bool planning, MotionStop2D stop, const char* failureReason,
                  double routeDistance, double straightDistance) {
     const int x = screenWidth - sidebarWidth;
     DrawRectangle(x, headerHeight + 64, sidebarWidth, height - headerHeight - 64, sidebarColor);
@@ -821,14 +825,19 @@ void drawSidebar(int screenWidth, int height, const std::vector<Joint2D>& joints
     DrawText("SIMULATION", left, y, 19, light);
     y += 36;
 
-    const char* status = planning ? "PLANNING..." : paused ? "PAUSED" : reached ? "TARGET REACHED" :
+    const char* status = stop == MotionStop2D::Emergency ? "EMERGENCY STOP" :
+        paused ? "PAUSED" : stop == MotionStop2D::Braking ? "BRAKING" :
+        stop == MotionStop2D::Controlled ? "STOPPED" : planning ? "PLANNING..." :
+        reached ? "TARGET REACHED" :
         noPath ? "NO SAFE PATH FOUND" : unreachable ? "UNREACHABLE" :
         stalled ? "BLOCKED" : constrained ? "AVOIDING CONTACT" : "MOVING";
-    const Color statusColor = planning ? blue : paused ? orange : reached ? green :
+    const Color statusColor = stop == MotionStop2D::Emergency ? red :
+        paused || stop == MotionStop2D::Braking ? orange :
+        stop == MotionStop2D::Controlled ? muted : planning ? blue : reached ? green :
         (stalled || unreachable || noPath) ? red : constrained ? orange : blue;
     DrawText(status, left, y, 16, statusColor);
     y += 33;
-    if ((noPath || stalled) && !planning) {
+    if ((noPath || stalled) && !planning && failureReason) {
         DrawText(failureReason, left, y, 13, red);
         y += 25;
     }
@@ -877,7 +886,6 @@ void drawSidebar(int screenWidth, int height, const std::vector<Joint2D>& joints
 } // namespace
 
 int main() {
-    using robotics::kinematics::advanceTowardTarget;
     using robotics::kinematics::MotionStatus2D;
     using robotics::kinematics::PlannedMotion2D;
     using robotics::kinematics::AsyncPlanner2D;
@@ -921,6 +929,7 @@ int main() {
     bool draggingObstacle = false;
     bool targetEditorActive = true;
     Vec2 target{1.5, 1.5};
+    Vec2 targetPreview = target;
     double simulatedTime = 0.0;
     double accumulator = 0.0;
     bool paused = false;
@@ -943,11 +952,10 @@ int main() {
         paused = true;
         accumulator = 0.0;
         asyncPlanner.cancel();
-        plannedMotion.reset();
+        plannedMotion.emergencyStop(joints);
         pendingPlan = true;
         planningError.clear();
         motionState = {};
-        for (auto& joint : joints) joint.angularVelocity = 0.0;
     };
 
     while (!WindowShouldClose()) {
@@ -955,6 +963,16 @@ int main() {
             // Pausing freezes simulated time and the follower's state together.
             paused = !paused;
             accumulator = 0.0;
+        }
+        const bool emergency = IsKeyPressed(KEY_E);
+        if (!replayActive && (emergency || IsKeyPressed(KEY_X))) {
+            asyncPlanner.cancel();
+            pendingPlan = false;
+            draggingTarget = false;
+            planningError.clear();
+            motionState = {};
+            if (emergency) plannedMotion.emergencyStop(joints);
+            else plannedMotion.requestStop();
         }
         const bool reset = IsKeyPressed(KEY_R);
         const bool selectTwo = IsKeyPressed(KEY_TWO);
@@ -1080,54 +1098,59 @@ int main() {
         if (IsMouseButtonReleased(MOUSE_BUTTON_LEFT)) draggingObstacle = false;
 
         if (!replayActive && canvasTool == CanvasTool::Target && mouseInCanvas &&
-            IsMouseButtonDown(MOUSE_BUTTON_LEFT)) {
+            (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) ||
+             (draggingTarget && IsMouseButtonDown(MOUSE_BUTTON_LEFT)))) {
             if (!draggingTarget) {
                 asyncPlanner.cancel();
-                plannedMotion.reset();
+                plannedMotion.requestStop();
+                pendingPlan = false;
+                motionState = {};
                 planningError.clear();
-                for (auto& joint : joints) joint.angularVelocity = 0.0;
             }
-            target = worldMouse;
+            targetPreview = worldMouse;
             draggingTarget = true;
         }
         if (draggingTarget && IsMouseButtonReleased(MOUSE_BUTTON_LEFT)) {
+            target = targetPreview;
+            plannedMotion.requestStop(target);
             draggingTarget = false;
             pendingPlan = true;
         }
         if (obstacleEdited) sceneChanged();
 
         if (!paused && !replayActive) {
-            // Plan a safe joint-space route once the target is committed.
-            // Retain immediate analytic motion while dragging a 2-link arm.
+            // Submit only after reaching rest so the result matches the
+            // actual start pose. While braking, keep checking the live scene.
             accumulator += std::min(static_cast<double>(GetFrameTime()), 0.1);
             for (int steps = 0; accumulator >= fixedDt && steps < 6; ++steps) {
-                if (draggingTarget) {
-                    // Never execute a path toward a target that is still moving.
-                    motionState = {};
-                } else {
-                    if (pendingPlan) {
-                        plannedMotion.reset();
-                        planningError.clear();
-                        (void)asyncPlanner.submit(joints, robot.limits, target,
-                                                  motionSettings, obstacles);
-                        pendingPlan = false;
-                    }
-                    if (auto result = asyncPlanner.takeResult()) {
-                        if (!result->error.empty()) {
-                            planningError = result->error;
-                            plannedMotion.reset();
-                        } else {
-                            plannedMotion.usePlan(std::move(result->plan), result->target);
-                        }
-                    }
-                    if (plannedMotion.hasTarget())
-                        motionState = plannedMotion.advance(
-                            joints, robot.limits, fixedDt, motionSettings, obstacles);
-                    else
-                        motionState = {};
+                if (pendingPlan && !draggingTarget &&
+                    plannedMotion.stopState() != MotionStop2D::Braking) {
+                    plannedMotion.reset();
+                    planningError.clear();
+                    (void)asyncPlanner.submit(joints, robot.limits, target,
+                                              motionSettings, obstacles);
+                    pendingPlan = false;
                 }
+                if (auto result = asyncPlanner.takeResult()) {
+                    if (!result->error.empty()) {
+                        planningError = result->error;
+                        plannedMotion.reset();
+                    } else {
+                        plannedMotion.usePlan(std::move(result->plan), result->target);
+                    }
+                }
+                const bool wasBraking = plannedMotion.stopState() == MotionStop2D::Braking;
+                motionState = plannedMotion.hasTarget() ?
+                    plannedMotion.advance(joints, robot.limits, fixedDt, motionSettings, obstacles) :
+                    MotionStatus2D{};
+                const auto stop = plannedMotion.stopState();
+                if (wasBraking && stop == MotionStop2D::Emergency) pendingPlan = false;
                 simulatedTime += fixedDt;
-                const PlannerState2D state = asyncPlanner.busy() ?
+                const PlannerState2D state =
+                    stop == MotionStop2D::Braking ? PlannerState2D::Braking :
+                    stop == MotionStop2D::Controlled ? PlannerState2D::Stopped :
+                    stop == MotionStop2D::Emergency ? PlannerState2D::EmergencyStop :
+                    asyncPlanner.busy() ?
                     PlannerState2D::Planning :
                     !planningError.empty() || plannedMotion.searchFailed() ?
                     PlannerState2D::NoPath :
@@ -1157,7 +1180,8 @@ int main() {
         const auto& displayJoints = playback ? playback->joints : joints;
         const auto& displayObstacles = playback ? playback->obstacles : obstacles;
         const auto& displayObject = playback ? playback->targetObject : motionSettings.targetObject;
-        const Vec2 displayTarget = playback ? playback->target : target;
+        const Vec2 physicalTarget = playback ? playback->target : target;
+        const Vec2 displayTarget = draggingTarget && !playback ? targetPreview : physicalTarget;
         const auto positions = forwardKinematics(displayJoints);
         const auto jacobian = endEffectorJacobian(positions);
         const auto velocity = endEffectorVelocity(jacobian, displayJoints);
@@ -1193,7 +1217,7 @@ int main() {
         drawScene(viewport, displayObstacles,
                   replayActive ? -1 : selectedObstacle);
         if (displayObject)
-            drawTargetBody(viewport, displayTarget, *displayObject);
+            drawTargetBody(viewport, physicalTarget, *displayObject);
         if (activeTab == 3 && !replayActive && plannedMotion.pathAvailable())
             drawJointTraces(viewport, plannedMotion.jointTraces(),
                             displayJoints, plannedMotion.finalJointAngles());
@@ -1202,16 +1226,18 @@ int main() {
             drawEndEffectorTrace(viewport, plannedMotion.endEffectorTrace());
         const bool displayFailure = playback ?
             playback->plannerState == PlannerState2D::NoPath ||
-                playback->plannerState == PlannerState2D::Blocked :
+                playback->plannerState == PlannerState2D::Blocked ||
+                playback->plannerState == PlannerState2D::EmergencyStop :
             plannedMotion.searchFailed() || !planningError.empty() || stalled;
         drawArm(viewport, positions, displayJoints, displayTarget,
                 !unreachable && !displayFailure, displayObject);
         if (activeTab == 3)
-            drawCollisionEnvelope(viewport, positions, displayJoints, displayTarget,
+            drawCollisionEnvelope(viewport, positions, displayJoints, physicalTarget,
                                   motionSettings, displayObject);
         EndScissorMode();
-        DrawText("T Target   C Circle   B Box   V Move   DEL Remove   SPACE Pause   2-5 Presets",
-                 20, height - 28, 15, muted);
+        constexpr const char* controls =
+            "T Target  C/B Obstacle  V Move  DEL Remove  SPACE Pause  X Stop  E E-stop  2-5 Presets";
+        DrawText(controls, 20, height - 28, canvasWidth < 780 ? 12 : 15, muted);
         DrawRectangle(0, 0, width, headerHeight, background);
         DrawText("ROBOTARM", 23, 16, 25, light);
         DrawText("2D Kinematics Laboratory", 197, 22, 17, muted);
@@ -1308,8 +1334,9 @@ int main() {
                         paused || replayActive, reached, stalled,
                         motionState.constrained, unreachable,
                         plannedMotion.searchFailed() || !planningError.empty(),
-                        planning,
+                        planning, plannedMotion.stopState(),
                         !planningError.empty() ? planningError.c_str() :
+                        plannedMotion.failureReason() == robotics::kinematics::PlanningFailure2D::None ? nullptr :
                         robotics::kinematics::planningFailureMessage(
                             plannedMotion.failureReason()),
                         plannedMotion.endEffectorDistance(),

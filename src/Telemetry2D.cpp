@@ -14,7 +14,7 @@
 namespace robotics::diagnostics {
 namespace {
 bool validState(PlannerState2D state) noexcept {
-    return state >= PlannerState2D::Idle && state <= PlannerState2D::NoPath;
+    return state >= PlannerState2D::Idle && state <= PlannerState2D::EmergencyStop;
 }
 } // namespace
 
@@ -27,6 +27,9 @@ const char* plannerStateName(PlannerState2D state) noexcept {
     case PlannerState2D::Reached: return "REACHED";
     case PlannerState2D::Blocked: return "BLOCKED";
     case PlannerState2D::NoPath: return "NO PATH";
+    case PlannerState2D::Braking: return "BRAKING";
+    case PlannerState2D::Stopped: return "STOPPED";
+    case PlannerState2D::EmergencyStop: return "EMERGENCY STOP";
     }
     return "UNKNOWN";
 }
@@ -105,7 +108,7 @@ void TelemetryRecorder2D::record(
 void TelemetryRecorder2D::save(const std::string& path) const {
     std::ofstream out(path, std::ios::trunc);
     if (!out) throw std::runtime_error("Could not open telemetry file for writing");
-    out << std::setprecision(17) << "RARM2D 4 " << frames_.size() << '\n';
+    out << std::setprecision(17) << "RARM2D 5 " << frames_.size() << '\n';
     for (const auto& frame : frames_) {
         out << frame.time << ' ' << frame.target.x << ' ' << frame.target.y
             << ' ' << static_cast<int>(frame.plannerState)
@@ -146,9 +149,10 @@ void TelemetryRecorder2D::load(const std::string& path) {
     int version = 0;
     std::size_t count = 0;
     if (!(in >> magic >> version >> count) ||
-        magic != "RARM2D" || version < 2 || version > 4 || count > capacity_)
+        magic != "RARM2D" || version < 2 || version > 5 || count > capacity_)
         throw std::runtime_error("Unsupported or oversized telemetry file");
 
+    const auto lastState = version >= 5 ? PlannerState2D::EmergencyStop : PlannerState2D::NoPath;
     TelemetryRecorder2D parsed(capacity_);
     for (std::size_t frameIndex = 0; frameIndex < count; ++frameIndex) {
         double time = 0.0;
@@ -157,7 +161,7 @@ void TelemetryRecorder2D::load(const std::string& path) {
         std::size_t jointCount = 0, obstacleCount = 0;
         if (!(in >> time >> target.x >> target.y >>
               state >> jointCount >> obstacleCount) ||
-            state < 0 || state > static_cast<int>(PlannerState2D::NoPath) ||
+            state < 0 || state > static_cast<int>(lastState) ||
             jointCount < 2 || jointCount > 64 || obstacleCount > 64)
             throw std::runtime_error("Malformed telemetry frame");
 

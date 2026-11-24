@@ -63,10 +63,10 @@ completeness and real-time replanning are not yet guaranteed.
 - [x] Prepare C2 quintic Hermite trajectories with a shared time clock;
       round intermediate corners only when each new curve is collision-free.
       Respect per-joint speed/acceleration and a global jerk bound.
-- [ ] Improve curvature/jerk optimization and remove avoidable stops at
-      narrow corners that are currently conservatively rejected.
-- [ ] Preserve joint velocity/acceleration continuity across target changes
-      while the previous plan is still executing.
+- [x] Reduce corner tangents incrementally with conservative whole-arc
+      clearance and derivative bounds.
+- [x] Preserve position, velocity and acceleration while braking the
+      previous plan, then replan from rest for the latest target.
 - [ ] Support controlled reconfiguration when feasible (including elbow-branch
       transitions in a future joint/geometry model).
 - [ ] Add replanning and safe stopping around moving obstacles.
@@ -125,9 +125,10 @@ milestones before generalizing spatial representations.
 
 #### 2D-C — Motion controller and trajectory quality
 
-- [ ] Keep velocity/acceleration continuous across retargeting and
-      distinguish controlled stop from emergency stop.
-- [ ] Refine spline corner treatment while preserving verified clearance.
+- [x] Preserve velocity and acceleration at a retarget with a
+      jerk-bounded controlled stop. Latch an emergency stop on unsafe steps.
+- [x] Reduce spline tangents before stopping at corners. Certify whole
+      arcs against joint limits, self-contact, static obstacles and target shafts.
 
 #### 2D-D — End-effector pose and manipulation
 
@@ -223,10 +224,9 @@ milestones before generalizing spatial representations.
    presented as proof of geometric impossibility.
 3. **Planning pauses GUI rendering**: resolved with an asynchronous C++20
    worker and stop-token cancellation on new targets/scene changes.
-4. **Path corners may stop briefly**: collision-validated quintic spline
-   rounding has been added. If the rounded corner is not provably safe
-   under the existing sampling checks, the joint-space tangent becomes zero
-   and the robot deliberately pauses at that waypoint.
+4. **Path corners may stop briefly**: the planner tries progressively
+   smaller tangents when a quintic arc cannot be certified clear. If all
+   rounded candidates are rejected, the waypoint uses a rest-to-rest turn.
 5. **Internal elbow-branch restriction**: internal joint ranges currently
    exclude the straight/folded poses; some physically possible transitions
    would require a more detailed geometric contact model.

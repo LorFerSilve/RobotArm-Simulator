@@ -15,7 +15,8 @@
 namespace robotics::diagnostics {
 
 enum class PlannerState2D {
-    Idle, Planning, Moving, Paused, Reached, Blocked, NoPath
+    Idle, Planning, Moving, Paused, Reached, Blocked, NoPath,
+    Braking, Stopped, EmergencyStop
 };
 
 [[nodiscard]] const char* plannerStateName(PlannerState2D state) noexcept;

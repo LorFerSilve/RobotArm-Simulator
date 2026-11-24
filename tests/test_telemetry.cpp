@@ -131,6 +131,19 @@ int main() {
         require(std::get<Box2D>(loaded.at(0).obstacles[1]).halfWidth == 0.6,
                 "Rectangle obstacle survives replay");
 
+        double stopTime = 0.4;
+        for (const auto state : {PlannerState2D::Braking, PlannerState2D::Stopped,
+                                 PlannerState2D::EmergencyStop}) {
+            recording.record(stopTime, joints, {1.5, 2.1}, state, scene);
+            stopTime += 0.1;
+        }
+        recording.save(filename);
+        loaded.load(filename);
+        require(loaded.at(0).plannerState == PlannerState2D::Braking &&
+                loaded.at(1).plannerState == PlannerState2D::Stopped &&
+                loaded.at(2).plannerState == PlannerState2D::EmergencyStop,
+                "Replay must distinguish braking, controlled rest and emergency stop");
+
         {
             std::ofstream legacy(badFile);
             legacy << "RARM2D 2 1\n0 0 0 1 2 0\n1 0 0 0\n2 1 0 0\n";
@@ -150,6 +163,14 @@ int main() {
                     legacy.at(0).targetObject->shape == TargetShape2D::Rectangle &&
                     legacy.at(0).joints[1].linkRadius == 0.0,
                 "Version 3 keeps its target geometry and centreline links");
+        {
+            std::ofstream previous(badFile);
+            previous << "RARM2D 4 1\n0 0 0 2 2 0\n1 0 0 0 0.125\n2 1 0 0 0\nN\n";
+        }
+        legacy.load(badFile);
+        require(legacy.at(0).plannerState == PlannerState2D::Moving &&
+                legacy.at(0).joints[0].linkRadius == 0.125,
+                "Version 4 keeps link radii and its original motion states");
         {
             std::ofstream invalid(badFile);
             invalid << "RARM2D 3 1\n0 0 0 1 2 0\n"

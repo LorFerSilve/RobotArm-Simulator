@@ -170,3 +170,7 @@ add_test(NAME CollisionBoundaries2D COMMAND test_collision_boundaries)
 add_executable(test_robust_planning tests/test_robust_planning.cpp)
 target_link_libraries(test_robust_planning PRIVATE robotics_core)
 add_test(NAME RobustPlanning2D COMMAND test_robust_planning)
+
+add_executable(test_motion_transitions tests/test_motion_transitions.cpp)
+target_link_libraries(test_motion_transitions PRIVATE robotics_core)
+add_test(NAME MotionTransitions2D COMMAND test_motion_transitions)

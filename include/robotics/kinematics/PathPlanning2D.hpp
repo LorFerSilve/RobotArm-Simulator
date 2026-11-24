@@ -4,6 +4,7 @@
 #include "robotics/geometry/Obstacles2D.hpp"
 
 #include <cstddef>
+#include <optional>
 #include <span>
 #include <stop_token>
 #include <vector>
@@ -61,24 +62,35 @@ struct PlannedJointPath2D {
     std::span<const geometry::Obstacle2D> obstacles = {},
     std::stop_token cancellation = {});
 
+enum class MotionStop2D { None, Braking, Controlled, Emergency };
+
 // Stateful path follower: execute planned joint-space waypoints with bounded
 // joint velocity and acceleration, checking collisions before each step.
 class PlannedMotion2D {
 public:
     void reset() noexcept;
-    // Install an already computed path without repeating IK/RRT on the UI thread.
+    // Install an already computed path from a matching stopped pose.
     void usePlan(PlannedJointPath2D plan, math::Vec2 target);
+    // While moving, brake first and plan for the latest target from rest.
     void setTarget(std::span<const Joint2D> joints,
                    std::span<const JointLimits2D> limits,
                    math::Vec2 target,
                    const MotionSettings2D& settings = {},
                    std::span<const geometry::Obstacle2D> obstacles = {});
+    // Brake along the current trajectory. An optional replacement physical
+    // target participates in the safety checks during the stop.
+    void requestStop(std::optional<math::Vec2> replacementTarget = std::nullopt);
+    // Freeze the pose immediately. A new plan or reset releases the stop.
+    void emergencyStop(std::span<Joint2D> joints) noexcept;
+    [[nodiscard]] MotionStop2D stopState() const noexcept { return stop_; }
     [[nodiscard]] MotionStatus2D advance(std::span<Joint2D> joints,
                                           std::span<const JointLimits2D> limits,
                                           double dt,
                                           const MotionSettings2D& settings = {},
                                           std::span<const geometry::Obstacle2D> obstacles = {});
-    [[nodiscard]] bool pathAvailable() const noexcept { return !path_.empty(); }
+    [[nodiscard]] bool pathAvailable() const noexcept {
+        return stop_ == MotionStop2D::None && !path_.empty();
+    }
     // Read-only drawing data; reset/new plan clears or replaces it.
     [[nodiscard]] double endEffectorDistance() const noexcept {
         return endEffectorDistance_;
@@ -100,6 +112,8 @@ public:
     [[nodiscard]] math::Vec2 target() const noexcept { return target_; }
 
 private:
+    [[nodiscard]] bool inMotion() const noexcept;
+
     std::vector<std::vector<double>> path_;
     std::vector<math::Vec2> endEffectorTrace_;
     std::vector<std::vector<math::Vec2>> jointTraces_;
@@ -115,6 +129,11 @@ private:
     bool hasTarget_{};
     bool failed_{};
     PlanningFailure2D failure_{PlanningFailure2D::None};
+    MotionStop2D stop_{MotionStop2D::None};
+    bool planAfterStop_{};
+    double brakeStart_{};
+    double brakeDuration_{};
+    double brakeElapsed_{};
 };
 
 } // namespace robotics::kinematics
