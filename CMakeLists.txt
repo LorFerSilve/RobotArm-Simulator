@@ -162,3 +162,7 @@ add_test(NAME TargetObject2D COMMAND test_target_object)
 add_executable(test_link_radii tests/test_link_radii.cpp)
 target_link_libraries(test_link_radii PRIVATE robotics_core)
 add_test(NAME LinkRadii2D COMMAND test_link_radii)
+
+add_executable(test_collision_boundaries tests/test_collision_boundaries.cpp)
+target_link_libraries(test_collision_boundaries PRIVATE robotics_core)
+add_test(NAME CollisionBoundaries2D COMMAND test_collision_boundaries)

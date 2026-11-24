@@ -109,8 +109,9 @@ milestones before generalizing spatial representations.
       joint-space edges, with separate shaft and tool-contact geometry.
 - [x] Support custom capsule radii per link. Apply surface clearances
       consistently in planning, execution, the GUI and session replay.
-- [ ] Add adversarial checks near tangencies and narrow passages; keep
-      rejection conservative if a safe path cannot be certified.
+- [x] Regress grazing contact with scene obstacles, the target shaft and
+      nonadjacent links. Verify motion through a narrow passage, rejection
+      at contact, and conservative rejection when clearance cannot be certified.
 
 #### 2D-B — Robust IK and planning
 

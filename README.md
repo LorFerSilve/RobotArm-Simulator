@@ -9,7 +9,7 @@ A modular C++20 robotic arm simulator featuring custom kinematics, Jacobian-base
 - Analytic 2 x N Jacobian, Cartesian end-effector velocity, and 2-joint determinant.
 - Custom damped least-squares inverse kinematics, velocity limiting, and target tolerance.
 - Collision-aware GUI motion: analytic two-link IK with a stable elbow branch, angular speed/acceleration caps, joint clearance, nonadjacent-link collision checks, and extra target-object/folding safeguards.
-- CLI frame telemetry and 26 automatic tests using CTest.
+- CLI frame telemetry and 27 automatic tests using CTest.
 - Interactive 2D GUI, using raylib **only** for display and input: target selection by mouse, real-time telemetry, pause/reset, grid and zoom.
 - **Configurable robot arm (Phase 1):** edit each link's length and radius, initial joint angle, rotation range, maximum speed and maximum acceleration for 2–6 joints in the GUI.
 
@@ -568,6 +568,13 @@ The `SweptCollision2D` regression covers a very narrow circle contact
 whose endpoints are both safe, unobstructed movements, cancellation,
 and input validation. Existing motion and scene regression suites remain
 active.
+
+The `CollisionBoundaries2D` regression tests grazing circles and rectangles
+between clear endpoint poses, near misses, and contact with the protected
+shaft or nonadjacent links. It also runs the planner and follower through a
+passage with 2 mm of spare width after clearance, and checks that they reject
+a route with intermediate contact. A positive gap below the numerical guard
+can still be rejected if the sweep cannot certify it.
 
 ## 2D-A — Explicit target objects and tool-contact geometry
 
