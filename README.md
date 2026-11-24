@@ -9,7 +9,7 @@ A modular C++20 robotic arm simulator featuring custom kinematics, Jacobian-base
 - Analytic 2 x N Jacobian, Cartesian end-effector velocity, and 2-joint determinant.
 - Custom damped least-squares inverse kinematics, velocity limiting, and target tolerance.
 - Collision-aware GUI motion: analytic two-link IK with a stable elbow branch, angular speed/acceleration caps, joint clearance, nonadjacent-link collision checks, and extra target-object/folding safeguards.
-- CLI frame telemetry and 27 automatic tests using CTest.
+- CLI frame telemetry and 28 automatic tests using CTest.
 - Interactive 2D GUI, using raylib **only** for display and input: target selection by mouse, real-time telemetry, pause/reset, grid and zoom.
 - **Configurable robot arm (Phase 1):** edit each link's length and radius, initial joint angle, rotation range, maximum speed and maximum acceleration for 2–6 joints in the GUI.
 
@@ -114,38 +114,23 @@ before activating them. In addition to the existing geometric safeguards,
 the motion controller now enforces each joint's configured range, speed,
 and acceleration caps (up to the engine's global caps).
 
-Internal joints must stay within one safe positive or negative elbow branch,
-avoiding fully folded and straight configurations. Consequently, some
-angle ranges are intentionally rejected. Valid configurations are not
-guaranteed to reach every requested target, and collision avoidance for
-three or more joints remains a local controller, not a global path planner.
+Robot configurations keep each internal joint within one safe positive or
+negative elbow branch, with margins from fully folded and straight poses.
 
 ## Recovery planning for redundant arms (3+ joints)
 
-The GUI now separates **finding a goal configuration**, **checking safe paths**,
+The GUI separates **finding a goal configuration**, **checking safe paths**,
 and **following a path**. The reusable C++20 module
-`PathPlanning2D.hpp/.cpp` searches for an alternate inverse-kinematics solution
-using deterministic multi-start damped-Jacobian refinement. It tries direct
-configuration-space interpolation first and falls back to a bounded
-bidirectional RRT-Connect search if that path crosses a self-collision or
-violates the configured joint limits. Edges are collision-checked at a maximum
-angular interpolation step of 0.04 radians; path segments are then shortened
-when a direct shortcut remains safe.
+`PathPlanning2D.hpp/.cpp` searches for goal poses using bounded, adaptive
+damped-Jacobian refinement. It compares a Cartesian-guided path and direct
+joint-space edges with available bidirectional RRT-Connect alternatives.
+Physical edges and shortcuts must pass the shared collision checks.
 
-The GUI follows the resulting joint waypoints using a **single coordinated quintic interpolation parameter** per segment, bounded by each joint's velocity and acceleration limits. To avoid running an expensive search every rendering frame, a
-new target is committed when the user **releases the mouse button**. The
-2-joint arm keeps the previously tested smooth analytic controller.
-
-A planner timeout or infeasible IK configuration is reported explicitly as
-`NO SAFE PATH FOUND`, never mislabeled as a successfully reached goal.
-This does **not** establish that the goal is mathematically unreachable.
-
-**Outstanding motion-planning work:** interactive planning can still cause a
-short UI pause because it currently runs on the rendering thread; future work
-should move bounded planning to a worker thread and support interruption when
-new targets are chosen. More advanced path smoothing/continuous collision
-checking, joint-branch switching, and planning around user-added obstacles
-are still open. See `docs/ROADMAP.md`.
+The GUI starts planning on a worker when the user **releases the mouse
+button**. Superseded requests can be cancelled. The follower moves all
+joints along the selected trajectory with a shared quintic time parameter
+and checks each step against the current constraints. The two-joint planner
+uses analytic IK on the current elbow branch.
 
 ## Playtest safety improvement: target objects and tightly folded arms
 
@@ -389,9 +374,24 @@ scene contact during calculation. **Only a collision-free final IK pose**
 is accepted, and the real RRT path and follower remain fully checked
 against all obstacle and target clearances.
 
-This improves goal-discovery coverage without relaxing any physical
-motion constraint. It does not make bounded random sampling complete.
-A three-joint obstacle-aware motion is included in `Obstacles2D` CTest.
+For redundant arms, the planner tries Cartesian guidance first. When more
+search is warranted, it refines the starting pose, then alternates full-range
+seeds with local restarts around the pose with the smallest position error
+or the first clear IK goal. The local neighborhood expands when progress
+stalls. The fallback uses at most 72 IK seeds and 16 RRT-Connect searches.
+It compares at most three prepared routes and can stop early near the
+straight-line distance.
+
+IK, RRT and spline joint coordinates use the intersection of the configured
+limits and the starting branch's clearance interval. The spline's control
+points keep each joint coordinate inside that interval between samples.
+
+The GUI distinguishes `IK SEARCH BUDGET EXHAUSTED` (no pose within
+tolerance found), `IK FOUND ONLY COLLIDING POSES` (reached poses failed
+the collision checks), and `PATH SEARCH BUDGET EXHAUSTED` (a clear pose
+was found without a certified route). The two budget results describe the
+bounded search outcome. `RobustPlanning2D` tests a recovered redundant
+detour, disconnected branches and the three failure outcomes.
 
 ## Live end-effector path silhouette
 
@@ -468,12 +468,11 @@ and all scene obstacles. A bounded number of deterministic passes and
 collision checks keeps the optimizer responsive in the background worker.
 It retains the original validated path if no cost-improving shortcut exists.
 
-In obstructed scenes, the solver also compares several independently
-found RRT paths/IK endpoints instead of taking the first success:
-up to four RRT route candidates for two joints or three successful
-multi-joint candidates. The selected result is the **lowest sampled tool
-travel distance of the successfully prepared, validated candidates**,
-including spline smoothing or its safe fallback.
+The solver compares independently found paths when the available route
+merits further search. It considers up to four RRT alternatives for two
+joints or three successfully prepared routes for redundant arms. The
+selected result has the **lowest sampled tool travel distance among the
+validated candidates**, measured after spline smoothing or its safe fallback.
 
 This is *local bounded optimization*, **not a guarantee of globally
 shortest path**. A narrow passage may require a temporary detour.

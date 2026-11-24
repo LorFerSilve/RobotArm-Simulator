@@ -166,3 +166,7 @@ add_test(NAME LinkRadii2D COMMAND test_link_radii)
 add_executable(test_collision_boundaries tests/test_collision_boundaries.cpp)
 target_link_libraries(test_collision_boundaries PRIVATE robotics_core)
 add_test(NAME CollisionBoundaries2D COMMAND test_collision_boundaries)
+
+add_executable(test_robust_planning tests/test_robust_planning.cpp)
+target_link_libraries(test_robust_planning PRIVATE robotics_core)
+add_test(NAME RobustPlanning2D COMMAND test_robust_planning)

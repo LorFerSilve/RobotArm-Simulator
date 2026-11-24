@@ -25,8 +25,8 @@ struct MotionSettings2D {
     std::optional<TargetObject2D> targetObject{};
 };
 
-// Per-joint constraints. The first joint may rotate through zero; for each
-// remaining joint, min/max must stay within a single non-collinear branch.
+// Per-joint constraints. The shoulder may rotate through zero. Planning
+// restricts the other joints to the interval of their starting branch.
 struct JointLimits2D {
     double minAngle;               // radians
     double maxAngle;               // radians

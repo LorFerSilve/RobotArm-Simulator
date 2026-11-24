@@ -19,7 +19,9 @@ enum class PlanningFailure2D {
     PathSearchExhausted,
     TargetBlockedByJointLimits,
     MotionLimitExceeded,
-    UnsafeMotionStep
+    UnsafeMotionStep,
+    IKSearchExhausted,
+    IKGoalsInCollision
 };
 
 [[nodiscard]] const char* planningFailureMessage(PlanningFailure2D reason) noexcept;
@@ -48,7 +50,8 @@ struct PlannedJointPath2D {
 };
 
 // Search in joint configuration space, not just end-effector space.
-// Deterministic, bounded multi-start IK followed by bidirectional RRT-Connect.
+// Bounded adaptive IK restarts and bidirectional RRT-Connect. All physical
+// edges respect the active joint branches and collision clearances.
 // There is no guarantee that a valid path will be found within the budget.
 [[nodiscard]] PlannedJointPath2D planJointPath2D(
     std::span<const Joint2D> joints,

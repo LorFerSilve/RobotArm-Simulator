@@ -74,19 +74,25 @@ struct SearchContext {
             targetApproachClear(points, target, settings.targetClearance, linkRadii);
     }
 
+    // Each internal joint can move in one connected interval. Even if raw
+    // limits include both signs, reaching the other branch would cross the
+    // forbidden straight or folded configurations.
+    [[nodiscard]] std::pair<double, double> angleRange(std::size_t i) const {
+        const auto& limit = limits[i];
+        if (i == 0) return {limit.minAngle, limit.maxAngle};
+        if (std::signbit(joints[i].angle)) {
+            return {std::max(limit.minAngle, -pi + settings.foldClearance),
+                    std::min(limit.maxAngle, -settings.jointClearance)};
+        }
+        return {std::max(limit.minAngle, settings.jointClearance),
+                std::min(limit.maxAngle, pi - settings.foldClearance)};
+    }
+
     [[nodiscard]] bool validJointAngles(const Angles& q) const {
         if (q.size() != joints.size()) return false;
         for (std::size_t i = 0; i < q.size(); ++i) {
-            if (!std::isfinite(q[i]) || q[i] < limits[i].minAngle ||
-                q[i] > limits[i].maxAngle) return false;
-            if (i > 0) {
-                const bool negative = std::signbit(joints[i].angle);
-                if ((negative && (q[i] > -settings.jointClearance ||
-                                  q[i] < -pi + settings.foldClearance)) ||
-                    (!negative && (q[i] < settings.jointClearance ||
-                                   q[i] > pi - settings.foldClearance)))
-                    return false;
-            }
+            const auto [low, high] = angleRange(i);
+            if (!std::isfinite(q[i]) || q[i] < low || q[i] > high) return false;
         }
         return true;
     }
@@ -236,61 +242,63 @@ double distanceSquared(const Angles& a, const Angles& b) {
     return sum;
 }
 
-// A constrained, damped Jacobian iteration; unlike the per-frame DLS motion
-// controller, this searches for a static *goal configuration* before moving.
-// Random restarts can find alternative redundant configurations.
-[[nodiscard]] bool refineIK(const SearchContext& c, Angles& q, math::Vec2 target) {
-    for (int step = 0; step < 180; ++step) {
-        if (c.cancelled()) return false;
-        const auto positions = c.positions(q);
-        const auto e = target - positions.back();
-        const double error = e.length();
-        if (error <= c.settings.positionTolerance) return c.valid(q);
-        const auto jacobian = endEffectorJacobian(positions);
+// Virtual damped Jacobian refinement within the physical joint intervals.
+// Return the remaining Cartesian error so the caller can distinguish slow
+// convergence from a reached pose that fails the separate collision check.
+[[nodiscard]] double refineIK(const SearchContext& c, Angles& q, math::Vec2 target) {
+    auto positions = c.positions(q);
+    auto error = target - positions.back();
+    double residual = error.length();
+    Angles direction(q.size()), next(q.size());
+    for (int step = 0; step < 180 && residual > c.settings.positionTolerance; ++step) {
+        if (c.cancelled()) return std::numeric_limits<double>::infinity();
+        auto jacobian = endEffectorJacobian(positions);
 
-        // Exclude columns that can only move farther outside a saturated bound.
-        // Retry with line search to preserve joint limits and self-collision.
+        // Freeze saturated joints that the gradient would push outward,
+        // both in the normal equations and in the resulting update.
         double xx = 0.0025, xy = 0.0, yy = 0.0025;
         for (std::size_t i = 0; i < q.size(); ++i) {
-            const auto& column = jacobian[i];
-            const double gradient = column.x * e.x + column.y * e.y;
-            if ((q[i] <= c.limits[i].minAngle + 1e-6 && gradient < 0.0) ||
-                (q[i] >= c.limits[i].maxAngle - 1e-6 && gradient > 0.0)) continue;
+            const auto [low, high] = c.angleRange(i);
+            auto& column = jacobian[i];
+            const double gradient = column.dot(error);
+            if (low == high || (q[i] <= low && gradient < 0.0) ||
+                (q[i] >= high && gradient > 0.0))
+                column = {};
             xx += column.x * column.x;
             xy += column.x * column.y;
             yy += column.y * column.y;
         }
         const double determinant = xx * yy - xy * xy;
-        if (!std::isfinite(determinant) || determinant <= 1e-15) return false;
-        const math::Vec2 w{(yy * e.x - xy * e.y) / determinant,
-                           (xx * e.y - xy * e.x) / determinant};
-        Angles direction(q.size());
+        if (!std::isfinite(determinant) || determinant <= 1e-15) break;
+        const math::Vec2 w{(yy * error.x - xy * error.y) / determinant,
+                           (xx * error.y - xy * error.x) / determinant};
+        if (!std::isfinite(w.x) || !std::isfinite(w.y)) break;
         for (std::size_t i = 0; i < q.size(); ++i)
             direction[i] = std::clamp(jacobian[i].dot(w), -0.3, 0.3);
 
         bool improved = false;
         for (double alpha = 1.0; alpha >= 1.0 / 128.0; alpha *= 0.5) {
-            Angles next = q;
-            for (std::size_t i = 0; i < q.size(); ++i)
-                next[i] = std::clamp(q[i] + alpha * direction[i],
-                                     c.limits[i].minAngle, c.limits[i].maxAngle);
+            for (std::size_t i = 0; i < q.size(); ++i) {
+                const auto [low, high] = c.angleRange(i);
+                next[i] = std::clamp(q[i] + alpha * direction[i], low, high);
+            }
             // IK iterations are virtual numerical guesses, not executed
-            // robot states. Do not reject a feasible goal just because an
-            // intermediate *calculation* overlaps a scene obstacle.
-            // Final IK solutions and the real RRT path are still fully checked.
-            if (!c.validJointAngles(next)) continue;
-            const double nextError = (target - c.positions(next).back()).length();
-            if (nextError < error - 1e-9) {
-                q = std::move(next);
+            // robot states. The goal and the actual motion are checked later.
+            if (!c.validJointAngles(next)) break;
+            forwardKinematics(c.joints, next, positions);
+            const auto nextError = target - positions.back();
+            const double nextResidual = nextError.length();
+            if (nextResidual < residual) {
+                q.swap(next);
+                error = nextError;
+                residual = nextResidual;
                 improved = true;
                 break;
             }
         }
-        if (!improved) return false;
+        if (!improved) break;
     }
-    return !c.cancelled() &&
-        (target - c.positions(q).back()).length() <= c.settings.positionTolerance &&
-        c.valid(q);
+    return residual;
 }
 
 struct TwoLinkPose {
@@ -301,12 +309,10 @@ struct TwoLinkPose {
 std::optional<TwoLinkPose> twoLinkPose(const SearchContext& c, math::Vec2 target) {
     const double first = c.joints[0].length;
     const double second = c.joints[1].length;
-    const auto& limit = c.limits[1];
+    const auto [low, high] = c.angleRange(1);
     const bool negative = std::signbit(c.joints[1].angle);
-    const double minBend = std::max(c.settings.jointClearance,
-                                   negative ? -limit.maxAngle : limit.minAngle);
-    const double maxBend = std::min(pi - c.settings.foldClearance,
-                                   negative ? -limit.minAngle : limit.maxAngle);
+    const double minBend = negative ? -high : low;
+    const double maxBend = negative ? -low : high;
     const auto reachAt = [first, second](double bend) {
         return std::hypot(first + second * std::cos(bend), second * std::sin(bend));
     };
@@ -375,7 +381,7 @@ std::optional<TwoLinkPose> twoLinkPose(const SearchContext& c, math::Vec2 target
             if (next.empty()) return {};
         } else {
             next = current;
-            if (!refineIK(c, next, nextTarget) ||
+            if (!(refineIK(c, next, nextTarget) <= c.settings.positionTolerance) ||
                 !c.validRobot(next) || !c.edge(current, next))
                 return {};
         }
@@ -435,7 +441,7 @@ struct Node {
     const double scale = searchStep / d;
     Angles next(from.size());
     for (std::size_t i = 0; i < from.size(); ++i)
-        next[i] = from[i] + scale * (to[i] - from[i]);
+        next[i] = std::lerp(from[i], to[i], scale);
     return next;
 }
 
@@ -469,11 +475,10 @@ int extend(std::vector<Node>& tree, const Angles& target, const SearchContext& c
 // Bidirectional RRT-Connect in configuration space. Path only contains
 // collision-checked edges; deterministic seed makes regressions reproducible.
 [[nodiscard]] std::vector<Angles> connectPath(
-    const SearchContext& c, const Angles& start, const Angles& goal,
-    std::mt19937& rng, bool tryDirect = true) {
-    if (tryDirect && c.edge(start, goal)) return {start, goal};
+    const SearchContext& c, const Angles& start, const Angles& goal, std::mt19937& rng) {
     std::vector<Node> fromStart{{start, -1}};
     std::vector<Node> fromGoal{{goal, -1}};
+    std::uniform_real_distribution<double> unit(0.0, 1.0);
     for (int iter = 0; iter < 1800; ++iter) {
         if (c.cancelled()) return {};
         const bool forward = iter % 2 == 0;
@@ -481,13 +486,12 @@ int extend(std::vector<Node>& tree, const Angles& target, const SearchContext& c
         auto& matching = forward ? fromGoal : fromStart;
         Angles sample(start.size());
         for (std::size_t i = 0; i < sample.size(); ++i) {
-            std::uniform_real_distribution<double> angle(c.limits[i].minAngle,
-                                                         c.limits[i].maxAngle);
-            sample[i] = angle(rng);
+            const auto [low, high] = c.angleRange(i);
+            sample[i] = std::lerp(low, high, unit(rng));
         }
         // An alternative search must start with a sampled branch. Starting
         // with goal bias would immediately recreate the already-tested edge.
-        if (iter % 9 == 0 && (tryDirect || iter != 0))
+        if (iter > 0 && iter % 9 == 0)
             sample = forward ? goal : start;
         const int grown = extend(growing, sample, c, forward);
         if (grown < 0) continue;
@@ -651,12 +655,21 @@ int extend(std::vector<Node>& tree, const Angles& target, const SearchContext& c
                 (plan.waypoints[i + 1][j] - plan.waypoints[i][j]);
         }
         if (beforeAfterDot <= 0.0) continue;
-        const double span = plan.pathDistances[i + 1] -
-                            plan.pathDistances[i - 1];
-        for (std::size_t j = 0; j < joints; ++j)
-            plan.splineTangents[i][j] =
-                0.45 * (plan.waypoints[i + 1][j] -
-                        plan.waypoints[i - 1][j]) / span;
+        const double before = plan.pathDistances[i] - plan.pathDistances[i - 1];
+        const double after = plan.pathDistances[i + 1] - plan.pathDistances[i];
+        for (std::size_t j = 0; j < joints; ++j) {
+            const double tangent = 0.45 * (plan.waypoints[i + 1][j] -
+                                           plan.waypoints[i - 1][j]) / (before + after);
+            const auto [low, high] = c.angleRange(j);
+            const double q = plan.waypoints[i][j];
+            // The furthest adjacent Bezier controls are q +/- 2*h*tangent/5.
+            // Keeping them inside the same interval bounds the entire curve.
+            const double minimum = std::max((q - high) / (0.4 * before),
+                                            (low - q) / (0.4 * after));
+            const double maximum = std::min((q - low) / (0.4 * before),
+                                            (high - q) / (0.4 * after));
+            plan.splineTangents[i][j] = std::clamp(tangent, minimum, maximum);
+        }
     }
 
     // Each candidate curve is validated using the same edge checker as the
@@ -826,6 +839,10 @@ void validateMotionLimits(std::span<const JointLimits2D> limits,
         !positive(settings.maxAngularAcceleration) ||
         !positive(settings.maxAngularJerk))
         throw std::invalid_argument("Invalid global motion limits");
+    if (!positive(settings.jointClearance) || settings.jointClearance >= pi / 2.0 ||
+        !std::isfinite(settings.foldClearance) ||
+        settings.foldClearance < settings.jointClearance || settings.foldClearance >= pi / 2.0)
+        throw std::invalid_argument("Invalid joint safety margins");
     for (const auto& limit : limits) {
         if (!std::isfinite(limit.minAngle) || !std::isfinite(limit.maxAngle) ||
             limit.minAngle >= limit.maxAngle || !positive(limit.maxAngularSpeed) ||
@@ -878,11 +895,6 @@ void validate(const SearchContext& c, math::Vec2 target) {
     if (c.joints.size() < 2 || c.joints.size() != c.limits.size() ||
         !std::isfinite(target.x) || !std::isfinite(target.y) ||
         !std::isfinite(c.settings.positionTolerance) || c.settings.positionTolerance <= 0.0 ||
-        !std::isfinite(c.settings.jointClearance) || c.settings.jointClearance <= 0.0 ||
-        c.settings.jointClearance >= pi / 2.0 ||
-        !std::isfinite(c.settings.foldClearance) ||
-        c.settings.foldClearance < c.settings.jointClearance ||
-        c.settings.foldClearance >= pi / 2.0 ||
         !std::isfinite(c.settings.targetClearance) ||
         c.settings.targetClearance < 0.0 ||
         !std::isfinite(c.settings.obstacleClearance) ||
@@ -951,6 +963,26 @@ PlannedJointPath2D planJointPath2D(std::span<const Joint2D> joints,
     }
 
     std::mt19937 rng{0x526f626fU};
+    const double directLowerBound = output.terminalError;
+    PlannedJointPath2D best;
+    const auto consider = [&](std::vector<Angles> path) {
+        if (path.empty() || c.cancelled()) return false;
+        PlannedJointPath2D candidate;
+        candidate.waypoints = std::move(path);
+        candidate.terminalError =
+            (target - c.positions(candidate.waypoints.back()).back()).length();
+        if (!(candidate.terminalError <= settings.positionTolerance)) return false;
+        candidate = withEndEffectorTrace(c, prepareTrajectory(c, std::move(candidate)));
+        if (!candidate.found() || !std::isfinite(candidate.endEffectorDistance))
+            return false;
+        if (!best.found() || candidate.endEffectorDistance < best.endEffectorDistance)
+            best = std::move(candidate);
+        return true;
+    };
+    const auto nearStraight = [&] {
+        return best.found() && best.endEffectorDistance <= directLowerBound * 1.03;
+    };
+
     if (joints.size() == 2) {
         // The closed-form IK solution is periodic in the shoulder angle.
         // A short shoulder rotation may sweep an intermediate link across the
@@ -983,38 +1015,24 @@ PlannedJointPath2D planJointPath2D(std::span<const Joint2D> joints,
         // Use Cartesian tip travel rather than the smallest joint-angle
         // change as the selection cost. A safe near-straight IK lift takes
         // priority over the broad arc of one joint-space interpolation.
-        PlannedJointPath2D best;
-        double bestDistance = std::numeric_limits<double>::infinity();
         std::vector<std::vector<Angles>> comparedPaths;
-        const auto consider = [&](std::vector<Angles> path) {
+        const auto considerDistinct = [&](std::vector<Angles> path) {
             if (path.empty() || c.cancelled() ||
                 std::find(comparedPaths.begin(), comparedPaths.end(), path) != comparedPaths.end())
                 return false;
             comparedPaths.push_back(path);
-            PlannedJointPath2D candidate;
-            candidate.waypoints = std::move(path);
-            candidate.terminalError =
-                (target - c.positions(candidate.waypoints.back()).back()).length();
-            candidate = withEndEffectorTrace(
-                c, prepareTrajectory(c, std::move(candidate)));
-            if (!candidate.found()) return false;
-            if (candidate.endEffectorDistance < bestDistance) {
-                bestDistance = candidate.endEffectorDistance;
-                best = std::move(candidate);
-            }
-            return true;
+            return consider(std::move(path));
         };
-        consider(cartesianGuidedPath(c, start, target));
+        considerDistinct(cartesianGuidedPath(c, start, target));
         for (const auto& goal : goals) {
             if (c.cancelled()) break;
-            if (c.edge(start, goal)) consider({start, goal});
+            if (c.edge(start, goal)) considerDistinct({start, goal});
         }
-        const double directLowerBound = (target - c.positions(start).back()).length();
         // In a free scene, the existing direct/Cartesian choice is sufficient.
         // With obstacles, a valid direct joint-space edge may still trace a
         // wide Cartesian arc; compare it with a few safe RRT alternatives.
         if (!c.cancelled() && best.found() &&
-            (obstacles.empty() || bestDistance <= directLowerBound * 1.03))
+            (obstacles.empty() || nearStraight()))
             return best;
 
         constexpr int variantsPerGoal = 2;
@@ -1022,15 +1040,13 @@ PlannedJointPath2D planJointPath2D(std::span<const Joint2D> joints,
         int candidates = 0;
         for (const auto& goal : goals) {
             for (int variant = 0; variant < variantsPerGoal; ++variant) {
-                if (c.cancelled() || candidates >= maxRrtCandidates ||
-                    (best.found() && bestDistance <= directLowerBound * 1.03))
+                if (c.cancelled() || candidates >= maxRrtCandidates || nearStraight())
                     break;
-                auto path = connectPath(c, start, goal, rng, false);
+                auto path = connectPath(c, start, goal, rng);
                 if (path.empty()) continue;
-                if (consider(shorten(c, std::move(path)))) ++candidates;
+                if (considerDistinct(shorten(c, std::move(path)))) ++candidates;
             }
-            if (c.cancelled() || candidates >= maxRrtCandidates ||
-                (best.found() && bestDistance <= directLowerBound * 1.03))
+            if (c.cancelled() || candidates >= maxRrtCandidates || nearStraight())
                 break;
         }
         if (c.cancelled()) {
@@ -1046,81 +1062,82 @@ PlannedJointPath2D planJointPath2D(std::span<const Joint2D> joints,
         return output;
     }
 
-    // Try a collision-checked Cartesian lift first. It tends to make the
-    // tool travel nearly straight and avoids unnecessary RRT detours. If any
-    // intermediate IK state or motion edge is unsafe, retain the existing
-    // multi-start IK/RRT behavior as a robust fallback.
-    auto guided = cartesianGuidedPath(c, start, target);
-    if (!guided.empty() && !c.cancelled()) {
-        output.waypoints = std::move(guided);
-        output.terminalError = (target - c.positions(output.waypoints.back()).back()).length();
-        return withEndEffectorTrace(c, prepareTrajectory(c, std::move(output)));
-    }
+    constexpr int maxIKAttempts = 72;
+    constexpr int extraIKAttempts = 12;
+    constexpr int maxRrtSearches = 16;
+    constexpr int maxRoutes = 3;
+    constexpr double initialRestartRadius = 0.25;
+    constexpr double maxRestartRadius = 1.5;
+    constexpr double duplicateGoalDistance = 0.01;
 
-    // Redundant arms may have many collision-free IK endpoints. In an
-    // obstructed scene, the first discovered RRT route can be much longer
-    // than another valid route to the very same Cartesian target.
-    //
-    // Compare at most three successful alternatives, and stop searching
-    // after a small bounded window beyond the first success. This keeps the
-    // asynchronous GUI responsive and avoids unbounded "optimization".
-    bool foundGoal = false;
-    PlannedJointPath2D best;
-    double bestDistance = std::numeric_limits<double>::infinity();
-    const double directLowerBound = (target - c.positions(start).back()).length();
-    int firstSuccessAttempt = -1;
-    int routesFound = 0;
-    for (int attempt = 0; attempt < 70; ++attempt) {
-        if (c.cancelled()) {
-            output.failure = PlanningFailure2D::Cancelled;
-            return output;
-        }
-        if (firstSuccessAttempt >= 0 &&
-            (routesFound >= 3 || attempt > firstSuccessAttempt + 10))
-            break;
+    int routes = consider(cartesianGuidedPath(c, start, target)) ? 1 : 0;
+    int attemptLimit = routes > 0 ? extraIKAttempts : maxIKAttempts;
+    int rrtSearches = 0;
+    bool foundIKPose = false;
+    bool foundSafeGoal = false;
+    std::vector<Angles> testedGoals;
+    Angles anchor = start;
+    double anchorError = directLowerBound;
+    double restartRadius = initialRestartRadius;
+    std::uniform_real_distribution<double> unit(0.0, 1.0);
+    for (int attempt = 0; attempt < attemptLimit && routes < maxRoutes &&
+                          !nearStraight() && !c.cancelled(); ++attempt) {
+        // Alternate full-range samples with local restarts. Use the best
+        // residual, then the first collision-free IK pose, as the local
+        // anchor. Expand the neighborhood when local restarts stall.
         Angles seed = start;
-        if (attempt != 0) {
+        const bool local = attempt % 2 != 0;
+        if (attempt > 0) {
             for (std::size_t i = 0; i < seed.size(); ++i) {
-                const auto& bound = limits[i];
-                const double low = (attempt % 3 == 0)
-                    ? std::max(bound.minAngle, start[i] - 1.5) : bound.minAngle;
-                const double high = (attempt % 3 == 0)
-                    ? std::min(bound.maxAngle, start[i] + 1.5) : bound.maxAngle;
-                seed[i] = std::uniform_real_distribution<double>(low, high)(rng);
+                auto [low, high] = c.angleRange(i);
+                if (local) {
+                    low = std::max(low, anchor[i] - restartRadius);
+                    high = std::min(high, anchor[i] + restartRadius);
+                }
+                seed[i] = std::lerp(low, high, unit(rng));
             }
         }
-        if (!c.validJointAngles(seed) || !refineIK(c, seed, target)) continue;
-        foundGoal = true;
-        auto path = connectPath(c, start, seed, rng);
-        if (path.empty()) continue;
-        if (firstSuccessAttempt < 0) firstSuccessAttempt = attempt;
-        ++routesFound;
-
-        PlannedJointPath2D candidate;
-        candidate.waypoints = shorten(c, std::move(path));
-        if (candidate.waypoints.empty()) continue;
-        candidate.terminalError =
-            (target - c.positions(candidate.waypoints.back()).back()).length();
-        candidate = withEndEffectorTrace(
-            c, prepareTrajectory(c, std::move(candidate)));
-        if (candidate.found() &&
-            candidate.endEffectorDistance < bestDistance) {
-            bestDistance = candidate.endEffectorDistance;
-            best = std::move(candidate);
+        const double residual = refineIK(c, seed, target);
+        if (c.cancelled()) break;
+        const bool reachedIK = residual <= settings.positionTolerance;
+        const bool safeGoal = reachedIK && c.valid(seed);
+        if (!foundSafeGoal && (safeGoal || residual < anchorError)) {
+            anchor = seed;
+            anchorError = residual;
+            restartRadius = initialRestartRadius;
+        } else if (local) {
+            restartRadius = std::min(maxRestartRadius, restartRadius * 1.5);
         }
+        foundIKPose = foundIKPose || reachedIK;
+        foundSafeGoal = foundSafeGoal || safeGoal;
+        if (!safeGoal) continue;
 
-        if (best.found() &&
-            (bestDistance <= directLowerBound * 1.03 ||
-             (obstacles.empty() && routesFound >= 1)))
-            break;
+        if (std::any_of(testedGoals.begin(), testedGoals.end(), [&](const Angles& goal) {
+                return distanceSquared(goal, seed) <
+                       duplicateGoalDistance * duplicateGoalDistance;
+            }))
+            continue;
+        testedGoals.push_back(seed);
+        std::vector<Angles> path;
+        if (c.edge(start, seed)) {
+            path = {start, seed};
+        } else if (rrtSearches < maxRrtSearches) {
+            ++rrtSearches;
+            path = connectPath(c, start, seed, rng);
+        }
+        if (!consider(shorten(c, std::move(path)))) continue;
+        ++routes;
+        if (routes == 1)
+            attemptLimit = std::min(maxIKAttempts, attempt + 1 + extraIKAttempts);
     }
     if (c.cancelled()) {
         output.failure = PlanningFailure2D::Cancelled;
         return output;
     }
     if (best.found()) return best;
-    output.failure = foundGoal ? PlanningFailure2D::PathSearchExhausted :
-                                 PlanningFailure2D::NoIKSolution;
+    output.failure = foundSafeGoal ? PlanningFailure2D::PathSearchExhausted :
+                     foundIKPose ? PlanningFailure2D::IKGoalsInCollision :
+                                   PlanningFailure2D::IKSearchExhausted;
     return output;
 }
 
@@ -1131,10 +1148,12 @@ const char* planningFailureMessage(PlanningFailure2D reason) noexcept {
     case PlanningFailure2D::OutOfReach: return "OUT OF REACH";
     case PlanningFailure2D::GoalInObstacle: return "TARGET BLOCKED";
     case PlanningFailure2D::NoIKSolution: return "NO VALID IK SOLUTION";
-    case PlanningFailure2D::PathSearchExhausted: return "SEARCH BUDGET EXHAUSTED";
+    case PlanningFailure2D::PathSearchExhausted: return "PATH SEARCH BUDGET EXHAUSTED";
     case PlanningFailure2D::TargetBlockedByJointLimits: return "TARGET BLOCKS SHOULDER ROTATION";
     case PlanningFailure2D::MotionLimitExceeded: return "MOTION LIMIT EXCEEDED";
     case PlanningFailure2D::UnsafeMotionStep: return "UNSAFE MOTION STEP";
+    case PlanningFailure2D::IKSearchExhausted: return "IK SEARCH BUDGET EXHAUSTED";
+    case PlanningFailure2D::IKGoalsInCollision: return "IK FOUND ONLY COLLIDING POSES";
     }
     return "UNKNOWN PLANNING STATUS";
 }

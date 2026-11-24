@@ -48,8 +48,9 @@ completeness and real-time replanning are not yet guaranteed.
       travel distance, with safe IK/RRT fallback.
 - [x] Identify two-joint target/shoulder winding barriers and elbow-imposed
       inner workspace limitations without falsely blaming the search budget.
-- [ ] Add adaptive RRT budgets and objective-aware multi-start search for
-      constrained environments where Cartesian lifting fails.
+- [x] Add adaptive IK restarts and compare safe alternatives by tool travel
+      when Cartesian lifting fails or produces a longer route.
+- [ ] Improve how the RRT growth budget is allocated across difficult goals.
 - [x] Apply bounded Cartesian-distance shortcutting to RRT paths, accepting
       only collision-checked transitions that reduce end-effector travel.
 - [x] In obstructed scenes, compare several safe RRT routes / IK endpoints
@@ -115,11 +116,12 @@ milestones before generalizing spatial representations.
 
 #### 2D-B — Robust IK and planning
 
-- [ ] Improve goal search in difficult redundant configurations with
-      adaptive bounded sampling and more informative failure causes.
-- [ ] Explore only physically valid joint-branch transitions.
-- [ ] Retain collision-aware shortest-tool-path heuristics without
-      replacing safety with a distance objective.
+- [x] Use adaptive bounded IK restarts for difficult redundant goals and
+      distinguish IK budget, colliding goal poses and path search failures.
+- [x] Limit IK, RRT-Connect and spline joint coordinates to the physically
+      usable interval of each starting branch.
+- [x] Rank collision-checked Cartesian, direct and RRT routes by sampled
+      tool travel after trajectory preparation.
 
 #### 2D-C — Motion controller and trajectory quality
 
