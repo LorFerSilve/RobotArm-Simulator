@@ -1,5 +1,6 @@
 #include "robotics/kinematics/SmoothMotion2D.hpp"
 
+#include "robotics/geometry/LinkRadii2D.hpp"
 #include "robotics/kinematics/ForwardKinematics.hpp"
 #include "robotics/kinematics/InverseKinematics2D.hpp"
 #include "robotics/kinematics/SweptCollision2D.hpp"
@@ -145,16 +146,16 @@ void validateTargetGeometry(std::span<const math::Vec2> positions,
 // Shared point-to-link calculation: the *same* tool-tip allowance is used
 // by both the allocation-free safety predicate and penetration-depth queries.
 double targetDepthAt(std::span<const math::Vec2> positions, std::size_t index,
-                     math::Vec2 target, double clearance, bool toolNearTarget) {
+                     math::Vec2 target, double clearance, double linkRadius,
+                     bool toolNearTarget) {
     auto shaftEnd = positions[index + 1];
     if (index + 2 == positions.size() && toolNearTarget) {
-        const auto shaft = positions[index + 1] - positions[index];
-        const double length = shaft.length();
+        const double length = (shaftEnd - positions[index]).length();
         const double toolLength = std::min(2.0 * clearance, 0.4 * length);
-        shaftEnd = positions[index] + shaft * ((length - toolLength) / length);
+        shaftEnd = toolContactStart2D(positions[index], shaftEnd, toolLength);
     }
     return std::max(0.0,
-        clearance - pointDistance(target, positions[index], shaftEnd));
+        clearance + linkRadius - pointDistance(target, positions[index], shaftEnd));
 }
 
 } // namespace
@@ -162,16 +163,24 @@ double targetDepthAt(std::span<const math::Vec2> positions, std::size_t index,
 void targetLinkPenetrations(std::span<const math::Vec2> positions,
                             math::Vec2 target, double clearance,
                             std::span<double> depths) {
+    targetLinkPenetrations(positions, target, clearance, depths, {});
+}
+
+void targetLinkPenetrations(std::span<const math::Vec2> positions,
+                            math::Vec2 target, double clearance,
+                            std::span<double> depths, std::span<const double> linkRadii) {
     validateTargetGeometry(positions, target, clearance);
+    geometry::validateLinkRadii(linkRadii, positions.size() - 1);
     if (depths.size() != positions.size() - 1)
         throw std::invalid_argument("Target-depth buffer must match link count");
     std::fill(depths.begin(), depths.end(), 0.0);
     if (clearance == 0.0) return;
 
-    const bool toolNearTarget =
-        (target - positions.back()).length() <= 2.0 * clearance;
+    const bool toolNearTarget = (target - positions.back()).length() <=
+        2.0 * clearance + geometry::linkRadiusAt(linkRadii, depths.size() - 1);
     for (std::size_t i = 0; i < depths.size(); ++i)
-        depths[i] = targetDepthAt(positions, i, target, clearance, toolNearTarget);
+        depths[i] = targetDepthAt(positions, i, target, clearance,
+                                  geometry::linkRadiusAt(linkRadii, i), toolNearTarget);
 }
 
 std::vector<double> targetLinkPenetrations(
@@ -183,13 +192,22 @@ std::vector<double> targetLinkPenetrations(
 
 bool targetApproachClear(std::span<const math::Vec2> positions,
                          math::Vec2 target, double clearance) {
+    return targetApproachClear(positions, target, clearance, {});
+}
+
+bool targetApproachClear(std::span<const math::Vec2> positions,
+                         math::Vec2 target, double clearance,
+                         std::span<const double> linkRadii) {
     validateTargetGeometry(positions, target, clearance);
+    const std::size_t linkCount = positions.size() - 1;
+    geometry::validateLinkRadii(linkRadii, linkCount);
     if (clearance == 0.0) return true;
 
-    const bool toolNearTarget =
-        (target - positions.back()).length() <= 2.0 * clearance;
-    for (std::size_t i = 0; i + 1 < positions.size(); ++i)
-        if (targetDepthAt(positions, i, target, clearance, toolNearTarget) != 0.0)
+    const bool toolNearTarget = (target - positions.back()).length() <=
+        2.0 * clearance + geometry::linkRadiusAt(linkRadii, linkCount - 1);
+    for (std::size_t i = 0; i < linkCount; ++i)
+        if (targetDepthAt(positions, i, target, clearance,
+                          geometry::linkRadiusAt(linkRadii, i), toolNearTarget) != 0.0)
             return false;
     return true;
 }
@@ -220,6 +238,15 @@ double targetObjectBound2D(const TargetObject2D& object) noexcept {
         std::hypot(object.halfWidth, object.halfHeight) + object.clearance;
 }
 
+math::Vec2 toolContactStart2D(math::Vec2 start, math::Vec2 tip, double toolLength) {
+    const auto offset = tip - start;
+    const double length = offset.length();
+    if (!std::isfinite(length) || !std::isfinite(toolLength) || toolLength < 0.0)
+        throw std::invalid_argument("Invalid tool contact geometry");
+    if (length <= toolLength) return start;
+    return start + offset * ((length - toolLength) / length);
+}
+
 namespace {
 
 void validateObjectContact(std::span<const math::Vec2> positions,
@@ -241,9 +268,7 @@ math::Vec2 protectedEnd(std::span<const math::Vec2> positions,
                         std::size_t index, const TargetObject2D& object) {
     const auto end = positions[index + 1];
     if (index + 2 != positions.size()) return end;
-    const auto shaft = end - positions[index];
-    const double length = shaft.length();
-    return positions[index] + shaft * ((length - object.toolLength) / length);
+    return toolContactStart2D(positions[index], end, object.toolLength);
 }
 
 } // namespace
@@ -251,12 +276,20 @@ math::Vec2 protectedEnd(std::span<const math::Vec2> positions,
 void targetLinkPenetrations(std::span<const math::Vec2> positions,
                             math::Vec2 target, const TargetObject2D& object,
                             std::span<double> depths) {
+    targetLinkPenetrations(positions, target, object, depths, {});
+}
+
+void targetLinkPenetrations(std::span<const math::Vec2> positions,
+                            math::Vec2 target, const TargetObject2D& object,
+                            std::span<double> depths, std::span<const double> linkRadii) {
     validateObjectContact(positions, target, object, depths.size());
+    geometry::validateLinkRadii(linkRadii, depths.size());
     const auto body = targetBody2D(object, target);
     for (std::size_t i = 0; i < depths.size(); ++i) {
         const double signedDistance = geometry::segmentSignedDistanceToObstacle(
             positions[i], protectedEnd(positions, i, object), body);
-        depths[i] = std::max(0.0, object.clearance - signedDistance);
+        depths[i] = std::max(0.0,
+            object.clearance + geometry::linkRadiusAt(linkRadii, i) - signedDistance);
     }
 }
 
@@ -270,31 +303,60 @@ std::vector<double> targetLinkPenetrations(
 
 bool targetApproachClear(std::span<const math::Vec2> positions,
                          math::Vec2 target, const TargetObject2D& object) {
+    return targetApproachClear(positions, target, object, {});
+}
+
+bool targetApproachClear(std::span<const math::Vec2> positions,
+                         math::Vec2 target, const TargetObject2D& object,
+                         std::span<const double> linkRadii) {
     validateObjectContact(positions, target, object, positions.size() - 1);
+    geometry::validateLinkRadii(linkRadii, positions.size() - 1);
     const auto body = targetBody2D(object, target);
     for (std::size_t i = 0; i + 1 < positions.size(); ++i)
         if (geometry::segmentHitsObstacle(
                 positions[i], protectedEnd(positions, i, object),
-                body, object.clearance))
+                body, object.clearance + geometry::linkRadiusAt(linkRadii, i)))
             return false;
     return true;
 }
 
 bool hasSelfCollision(std::span<const math::Vec2> positions, double clearance) {
+    return hasSelfCollision(positions, clearance, {});
+}
+
+bool hasSelfCollision(std::span<const math::Vec2> positions, double clearance,
+                      std::span<const double> linkRadii) {
     if (!std::isfinite(clearance) || clearance < 0.0)
         throw std::invalid_argument("Self collision clearance must be finite and nonnegative");
     for (const auto& position : positions) {
         if (!finite(position)) throw std::invalid_argument("Invalid position");
     }
     const std::size_t links = positions.empty() ? 0 : positions.size() - 1;
+    geometry::validateLinkRadii(linkRadii, links);
     for (std::size_t i = 0; i < links; ++i) {
         for (std::size_t j = i + 2; j < links; ++j) {
             if (segmentDistance(positions[i], positions[i + 1],
-                                positions[j], positions[j + 1]) <= clearance)
+                                positions[j], positions[j + 1]) <=
+                clearance + geometry::linkRadiusAt(linkRadii, i) +
+                    geometry::linkRadiusAt(linkRadii, j))
                 return true;
         }
     }
     return false;
+}
+
+std::vector<double> linkRadii2D(std::span<const Joint2D> joints) {
+    if (std::all_of(joints.begin(), joints.end(),
+                    [](const Joint2D& joint) { return joint.linkRadius == 0.0; }))
+        return {};
+    std::vector<double> radii;
+    radii.reserve(joints.size());
+    for (const auto& joint : joints) {
+        if (!geometry::validLinkRadius(joint.linkRadius))
+            throw std::invalid_argument("Link radii must be finite and nonnegative");
+        radii.push_back(joint.linkRadius);
+    }
+    return radii;
 }
 
 MotionStatus2D advanceTowardTarget(std::span<Joint2D> joints, math::Vec2 target,
@@ -342,8 +404,9 @@ MotionStatus2D advanceTowardTarget(std::span<Joint2D> joints, math::Vec2 target,
          options.targetObject->toolLength >= joints.back().length))
         throw std::invalid_argument("Invalid target object or tool contact length");
     const auto positions = forwardKinematics(joints);
+    const auto radii = linkRadii2D(joints);
     if (!allowedAngles(joints, joints, options.jointClearance, options.foldClearance) ||
-        hasSelfCollision(positions, options.linkClearance))
+        hasSelfCollision(positions, options.linkClearance, radii))
         throw std::invalid_argument("Robot starts in an unsafe configuration");
 
     MotionStatus2D status;
@@ -353,7 +416,7 @@ MotionStatus2D advanceTowardTarget(std::span<Joint2D> joints, math::Vec2 target,
     status.reached = status.positionError <= options.positionTolerance;
     status.outOfReach = target.length() > totalLength;
     if (!options.targetObject &&
-        !targetApproachClear(positions, target, options.targetClearance)) {
+        !targetApproachClear(positions, target, options.targetClearance, radii)) {
         status.blocked = true;
         for (auto& joint : joints) joint.angularVelocity = 0.0;
         return status;
@@ -444,7 +507,7 @@ MotionStatus2D advanceTowardTarget(std::span<Joint2D> joints, math::Vec2 target,
                         (proposal[i].angle - joints[i].angle) *
                         (static_cast<double>(sub) / 8.0);
                 if (!targetApproachClear(forwardKinematics(sweep), target,
-                                         options.targetClearance)) {
+                                         options.targetClearance, radii)) {
                     status.blocked = true;
                     status.constrained = true;
                     for (auto& joint : joints) joint.angularVelocity = 0.0;
@@ -494,7 +557,7 @@ MotionStatus2D advanceTowardTarget(std::span<Joint2D> joints, math::Vec2 target,
                 }
                 if (!options.targetObject &&
                     !targetApproachClear(forwardKinematics(intermediate), target,
-                                         options.targetClearance)) {
+                                         options.targetClearance, radii)) {
                     safe = false;
                     break;
                 }

@@ -12,6 +12,7 @@ struct JointDefinition2D {
     double length;       // metres
     double initialAngle; // radians, relative to preceding link
     JointLimits2D limits;
+    double linkRadius{};  // metres
 };
 
 struct Robot2D {

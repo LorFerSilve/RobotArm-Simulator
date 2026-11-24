@@ -1,5 +1,6 @@
 #include "robotics/diagnostics/Telemetry2D.hpp"
 
+#include "robotics/geometry/LinkRadii2D.hpp"
 #include "robotics/kinematics/ForwardKinematics.hpp"
 #include "robotics/kinematics/Jacobian2D.hpp"
 
@@ -61,10 +62,13 @@ void TelemetryRecorder2D::record(
         if (!geometry::validObstacle(obstacle))
             throw std::invalid_argument("Invalid recorded obstacle");
 
-    // FK validates link lengths and angles; velocity must be checked too.
-    for (const auto& joint : joints)
+    // FK validates link lengths and angles.
+    for (const auto& joint : joints) {
         if (!std::isfinite(joint.angularVelocity))
             throw std::invalid_argument("Non-finite recorded joint velocity");
+        if (!geometry::validLinkRadius(joint.linkRadius))
+            throw std::invalid_argument("Invalid recorded link radius");
+    }
 
     const auto points = kinematics::forwardKinematics(joints);
     const auto columns = kinematics::endEffectorJacobian(points);
@@ -101,7 +105,7 @@ void TelemetryRecorder2D::record(
 void TelemetryRecorder2D::save(const std::string& path) const {
     std::ofstream out(path, std::ios::trunc);
     if (!out) throw std::runtime_error("Could not open telemetry file for writing");
-    out << std::setprecision(17) << "RARM2D 3 " << frames_.size() << '\n';
+    out << std::setprecision(17) << "RARM2D 4 " << frames_.size() << '\n';
     for (const auto& frame : frames_) {
         out << frame.time << ' ' << frame.target.x << ' ' << frame.target.y
             << ' ' << static_cast<int>(frame.plannerState)
@@ -110,7 +114,7 @@ void TelemetryRecorder2D::save(const std::string& path) const {
             const auto& joint = frame.joints[i];
             out << joint.length << ' ' << joint.angle << ' '
                 << joint.angularVelocity << ' '
-                << frame.angularAccelerations[i] << '\n';
+                << frame.angularAccelerations[i] << ' ' << joint.linkRadius << '\n';
         }
         for (const auto& obstacle : frame.obstacles) {
             if (const auto* circle = std::get_if<geometry::Circle2D>(&obstacle)) {
@@ -142,7 +146,7 @@ void TelemetryRecorder2D::load(const std::string& path) {
     int version = 0;
     std::size_t count = 0;
     if (!(in >> magic >> version >> count) ||
-        magic != "RARM2D" || (version != 2 && version != 3) || count > capacity_)
+        magic != "RARM2D" || version < 2 || version > 4 || count > capacity_)
         throw std::runtime_error("Unsupported or oversized telemetry file");
 
     TelemetryRecorder2D parsed(capacity_);
@@ -165,6 +169,8 @@ void TelemetryRecorder2D::load(const std::string& path) {
                   joint.angularVelocity >> accelerations[i]) ||
                 !std::isfinite(accelerations[i]))
                 throw std::runtime_error("Malformed telemetry joint");
+            if (version >= 4 && !(in >> joint.linkRadius))
+                throw std::runtime_error("Missing telemetry link radius");
         }
 
         std::vector<geometry::Obstacle2D> obstacles;
@@ -189,7 +195,7 @@ void TelemetryRecorder2D::load(const std::string& path) {
             }
         }
         std::optional<kinematics::TargetObject2D> targetObject;
-        if (version == 3) {
+        if (version >= 3) {
             char kind = 0;
             if (!(in >> kind) || (kind != 'N' && kind != 'C' && kind != 'B'))
                 throw std::runtime_error("Malformed telemetry target");

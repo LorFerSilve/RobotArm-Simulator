@@ -14,10 +14,10 @@ struct MotionSettings2D {
     double maxAngularSpeed{2.0};         // rad/s
     double maxAngularAcceleration{6.0}; // rad/s^2
     double jointClearance{0.14};        // radians from straight/folded singular poses
-    double linkClearance{0.10};         // metres between nonadjacent links
+    double linkClearance{0.10};         // gap between nonadjacent link surfaces, m
     double foldClearance{0.14};        // minimum angle away from a complete fold
     double targetClearance{0.0};       // optional target-object radius, metres
-    double obstacleClearance{0.10};    // robot half-width + obstacle safety margin, m
+    double obstacleClearance{0.10};    // gap from link surfaces to scene obstacles, m
     double positionTolerance{0.005};  // metres
     double maxAngularJerk{120.0};       // rad/s^3, global planned-motion limit
     // Explicit target geometry and physical terminal tool section. When
@@ -63,12 +63,18 @@ struct MotionStatus2D {
 void targetLinkPenetrations(std::span<const math::Vec2> positions,
                             math::Vec2 target, double clearance,
                             std::span<double> depths);
+void targetLinkPenetrations(std::span<const math::Vec2> positions,
+                            math::Vec2 target, double clearance,
+                            std::span<double> depths, std::span<const double> linkRadii);
 
 // The target represents a small physical object. Links except the tool-end
 // must keep clearance; the final link can approach within the tool-tip zone.
 // Clearance zero disables the target-object check for legacy simulations.
 [[nodiscard]] bool targetApproachClear(std::span<const math::Vec2> positions,
                                        math::Vec2 target, double clearance);
+[[nodiscard]] bool targetApproachClear(std::span<const math::Vec2> positions,
+                                       math::Vec2 target, double clearance,
+                                       std::span<const double> linkRadii);
 
 
 // Explicit target-object contact geometry, independent from the legacy
@@ -78,14 +84,28 @@ void targetLinkPenetrations(std::span<const math::Vec2> positions,
 void targetLinkPenetrations(std::span<const math::Vec2> positions,
                             math::Vec2 target, const TargetObject2D& object,
                             std::span<double> depths);
+void targetLinkPenetrations(std::span<const math::Vec2> positions,
+                            math::Vec2 target, const TargetObject2D& object,
+                            std::span<double> depths, std::span<const double> linkRadii);
 [[nodiscard]] std::vector<double> targetLinkPenetrations(
     std::span<const math::Vec2> positions, math::Vec2 target,
     const TargetObject2D& object);
 [[nodiscard]] bool targetApproachClear(
     std::span<const math::Vec2> positions, math::Vec2 target,
     const TargetObject2D& object);
+[[nodiscard]] bool targetApproachClear(
+    std::span<const math::Vec2> positions, math::Vec2 target,
+    const TargetObject2D& object, std::span<const double> linkRadii);
 
 [[nodiscard]] bool hasSelfCollision(std::span<const math::Vec2> positions,
                                     double clearance);
+// Nonadjacent capsules collide if their combined radii and the gap reach
+// the centreline distance. Adjacent links share a pivot and use angle limits.
+[[nodiscard]] bool hasSelfCollision(std::span<const math::Vec2> positions,
+                                    double clearance, std::span<const double> linkRadii);
+
+// Validate radii and extract them once for a series of collision queries.
+// Returns an empty vector for a centreline arm.
+[[nodiscard]] std::vector<double> linkRadii2D(std::span<const Joint2D> joints);
 
 } // namespace robotics::kinematics

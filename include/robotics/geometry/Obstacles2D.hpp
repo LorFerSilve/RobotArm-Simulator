@@ -46,4 +46,12 @@ using Obstacle2D = std::variant<Circle2D, Box2D>;
     std::span<const Obstacle2D> obstacles,
     double clearance);
 
+// Each capsule radius is added to the gap between the link and the obstacle.
+// Empty radii use zero-thickness links.
+[[nodiscard]] bool hasObstacleCollision(
+    std::span<const math::Vec2> positions,
+    std::span<const Obstacle2D> obstacles,
+    double clearance,
+    std::span<const double> linkRadii);
+
 } // namespace robotics::geometry

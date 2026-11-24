@@ -16,7 +16,7 @@ struct TargetObject2D {
     double radius{0.16};          // circle radius, metres
     double halfWidth{0.16};       // rectangle half width, metres
     double halfHeight{0.12};      // rectangle half height, metres
-    double clearance{0.0};       // additional shaft/object separation, metres
+    double clearance{0.0};       // gap from the shaft surface to the object, metres
     double toolLength{0.30};     // length of terminal link reserved for tool contact
 };
 
@@ -25,5 +25,8 @@ struct TargetObject2D {
     const TargetObject2D& object, math::Vec2 center);
 // Bounding radius of solid object plus clearance (for conservative tests).
 [[nodiscard]] double targetObjectBound2D(const TargetObject2D& object) noexcept;
+// Point at which the protected shaft ends and the distal tool begins.
+[[nodiscard]] math::Vec2 toolContactStart2D(math::Vec2 start, math::Vec2 tip,
+                                           double toolLength);
 
 } // namespace robotics::kinematics

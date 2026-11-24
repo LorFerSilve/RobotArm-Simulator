@@ -1,4 +1,5 @@
 #include "robotics/geometry/Obstacles2D.hpp"
+#include "robotics/geometry/LinkRadii2D.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -187,15 +188,24 @@ double segmentSignedDistanceToObstacle(
 bool hasObstacleCollision(std::span<const math::Vec2> positions,
                           std::span<const Obstacle2D> obstacles,
                           double clearance) {
+    return hasObstacleCollision(positions, obstacles, clearance, {});
+}
+
+bool hasObstacleCollision(std::span<const math::Vec2> positions,
+                          std::span<const Obstacle2D> obstacles,
+                          double clearance, std::span<const double> linkRadii) {
     if (!std::isfinite(clearance) || clearance < 0.0)
         throw std::invalid_argument("Invalid obstacle clearance");
+    validateLinkRadii(linkRadii, positions.empty() ? 0 : positions.size() - 1);
     for (const auto& p : positions)
         if (!finite(p)) throw std::invalid_argument("Invalid arm position");
     for (const auto& obstacle : obstacles) {
         requireValid(obstacle, clearance);
         for (std::size_t i = 1; i < positions.size(); ++i)
             if (segmentHitsObstacleUnchecked(positions[i - 1], positions[i],
-                                             obstacle, clearance)) return true;
+                                             obstacle,
+                                             clearance + linkRadiusAt(linkRadii, i - 1)))
+                return true;
     }
     return false;
 }

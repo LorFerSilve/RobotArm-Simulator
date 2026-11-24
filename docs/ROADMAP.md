@@ -80,7 +80,7 @@ completeness and real-time replanning are not yet guaranteed.
 - [x] Visualize other joint paths, the predicted final pose, and approximate
       link/target collision envelopes. These overlays are diagnostic only,
       not mathematically certified continuous collision detection.
-- [x] Support reproducible recording/replay of joint positions, velocities,
+- [x] Support reproducible recording/replay of joint positions, velocities, link radii,
       target geometry, tool contact length and static obstacles. The viewer
       replays stored frames and never recomputes a planner solution.
 - [ ] Consider optional full-session/unbounded capture for long experiments
@@ -107,8 +107,8 @@ milestones before generalizing spatial representations.
       safety and the SCENE editor. Keep old APIs available for compatibility.
 - [x] Certify continuous target-object approach and retreat along linear
       joint-space edges, with separate shaft and tool-contact geometry.
-- [ ] Support custom link radii where needed, with one consistent
-      clearance convention in planning, execution and visualization.
+- [x] Support custom capsule radii per link. Apply surface clearances
+      consistently in planning, execution, the GUI and session replay.
 - [ ] Add adversarial checks near tangencies and narrow passages; keep
       rejection conservative if a safe path cannot be certified.
 

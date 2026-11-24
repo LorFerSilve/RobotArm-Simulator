@@ -12,7 +12,8 @@ namespace robotics::kinematics {
 // Conservative continuous collision test for a LINEAR JOINT-SPACE edge.
 //
 // Proves that all intermediate link poses avoid static scene obstacles
-// (with robot thickness/clearance) and nonadjacent link self-contact.
+// and nonadjacent link self-contact. The given clearances are surface gaps
+// in addition to the physical link radii carried by the joints.
 // Uses a bound on the maximum endpoint displacement over each time interval,
 // subdividing until all intervals are certified clear.
 //

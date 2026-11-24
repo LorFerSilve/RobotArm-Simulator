@@ -32,6 +32,7 @@ int boundedSampleCount(double estimate, int minimum, int maximum) {
 struct SearchContext {
     std::vector<Joint2D> joints;
     std::vector<JointLimits2D> limits;
+    std::vector<double> linkRadii;
     const MotionSettings2D& settings;
     math::Vec2 target;
     std::span<const geometry::Obstacle2D> obstacles;
@@ -45,7 +46,8 @@ struct SearchContext {
                            std::span<const geometry::Obstacle2D> scene,
                            std::stop_token stop = {})
         : joints(state.begin(), state.end()), limits(bounds.begin(), bounds.end()),
-          settings(s), target(goal), obstacles(scene), cancellation(stop) {}
+          linkRadii(linkRadii2D(state)), settings(s), target(goal),
+          obstacles(scene), cancellation(stop) {}
 
     [[nodiscard]] Angles angles() const {
         Angles q;
@@ -68,8 +70,8 @@ struct SearchContext {
 
     [[nodiscard]] bool targetClear(std::span<const math::Vec2> points) const {
         return settings.targetObject ?
-            targetApproachClear(points, target, *settings.targetObject) :
-            targetApproachClear(points, target, settings.targetClearance);
+            targetApproachClear(points, target, *settings.targetObject, linkRadii) :
+            targetApproachClear(points, target, settings.targetClearance, linkRadii);
     }
 
     [[nodiscard]] bool validJointAngles(const Angles& q) const {
@@ -91,9 +93,9 @@ struct SearchContext {
 
     [[nodiscard]] bool collisionFreeRobot(
         std::span<const math::Vec2> points) const {
-        return !hasSelfCollision(points, settings.linkClearance) &&
+        return !hasSelfCollision(points, settings.linkClearance, linkRadii) &&
                !geometry::hasObstacleCollision(points, obstacles,
-                                                settings.obstacleClearance);
+                                                settings.obstacleClearance, linkRadii);
     }
 
     [[nodiscard]] bool validRobot(const Angles& q) const {
@@ -145,7 +147,9 @@ struct SearchContext {
 
         std::vector<double> previous(joints.size());
         std::vector<double> next(joints.size());
-        targetLinkPenetrations(points, target, settings.targetClearance, previous);
+        targetLinkPenetrations(points, target, settings.targetClearance, previous, linkRadii);
+        const double targetReach = settings.targetClearance + (linkRadii.empty() ? 0.0 :
+            *std::max_element(linkRadii.begin(), linkRadii.end()));
 
         double maxDelta = 0.0;
         for (std::size_t i = 0; i < a.size(); ++i)
@@ -177,7 +181,7 @@ struct SearchContext {
                     maximumTravel += downstream * std::abs(to[i] - from[i]);
                 }
                 if (nearestLinkDistance(points) <=
-                    targetBound() + maximumTravel) {
+                    targetReach + maximumTravel) {
                     const double maxTravelPerCheck =
                         std::max(0.02, targetBound() * 0.4);
                     requiredChecks = std::max(
@@ -206,7 +210,7 @@ struct SearchContext {
                 forwardKinematics(joints, q, points);
                 if (!collisionFreeRobot(points)) return false;
 
-                targetLinkPenetrations(points, target, settings.targetClearance, next);
+                targetLinkPenetrations(points, target, settings.targetClearance, next, linkRadii);
                 for (std::size_t i = 0; i < next.size(); ++i)
                     if (next[i] > previous[i] + 1e-9) return false;
                 previous.swap(next);
@@ -395,8 +399,9 @@ std::optional<TwoLinkPose> twoLinkPose(const SearchContext& c, math::Vec2 target
          c.settings.targetObject->shape != TargetShape2D::Circle))
         return false;
     const double r = c.target.length();
-    if (r <= c.targetBound() ||
-        r > c.joints[0].length + c.targetBound())
+    const double shoulderClearance = c.targetBound() + c.joints[0].linkRadius;
+    if (r <= shoulderClearance ||
+        r > c.joints[0].length + shoulderClearance)
         return false;
     const double theta = std::atan2(c.target.y, c.target.x);
     for (const auto& goal : goals) {
@@ -927,7 +932,7 @@ PlannedJointPath2D planJointPath2D(std::span<const Joint2D> joints,
     // A tool endpoint inside a solid obstacle cannot be a valid goal.
     for (const auto& obstacle : obstacles) {
         if (geometry::pointHitsObstacle(target, obstacle,
-                                        settings.obstacleClearance)) {
+                                        settings.obstacleClearance + joints.back().linkRadius)) {
             output.failure = PlanningFailure2D::GoalInObstacle;
             return output;
         }
@@ -937,9 +942,9 @@ PlannedJointPath2D planJointPath2D(std::span<const Joint2D> joints,
     const bool targetCoversBase = settings.targetObject ?
         geometry::pointHitsObstacle({0.0, 0.0},
             targetBody2D(*settings.targetObject, target),
-            settings.targetObject->clearance) :
+            settings.targetObject->clearance + joints.front().linkRadius) :
         (settings.targetClearance > 0.0 &&
-         target.length() < settings.targetClearance);
+         target.length() < settings.targetClearance + joints.front().linkRadius);
     if (targetCoversBase) {
         output.failure = PlanningFailure2D::GoalInObstacle;
         return output;

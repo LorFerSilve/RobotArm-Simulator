@@ -71,6 +71,8 @@ int main() {
         require(recording.at(0).angularAccelerations[0] == 0.0,
                 "First sample has no acceleration reference");
         joints[0].angularVelocity = 0.2;
+        joints[0].linkRadius = 0.13;
+        joints[1].linkRadius = 0.02;
         recording.record(0.1, joints, {1.1, 2.1},
                          PlannerState2D::Moving, scene, circleTarget);
         require(std::abs(recording.at(1).angularAccelerations[0] - 2.0) < 1e-12,
@@ -79,6 +81,7 @@ int main() {
                 "Planner status must be recorded");
 
         joints[0].angle += 0.1;
+        joints[0].linkRadius = 0.22;
         recording.record(0.2, joints, {1.3, 2.2},
                          PlannerState2D::Paused, scene, rectangleTarget);
         recording.record(0.3, joints, {1.5, 2.1},
@@ -119,7 +122,8 @@ int main() {
             for (std::size_t j = 0; j < a.joints.size(); ++j)
                 require(a.joints[j].length == b.joints[j].length &&
                         a.joints[j].angle == b.joints[j].angle &&
-                        a.joints[j].angularVelocity == b.joints[j].angularVelocity,
+                        a.joints[j].angularVelocity == b.joints[j].angularVelocity &&
+                        a.joints[j].linkRadius == b.joints[j].linkRadius,
                         "Replay must preserve exact joint states");
         }
         require(std::get<Circle2D>(loaded.at(0).obstacles[0]).radius == 0.4,
@@ -133,8 +137,19 @@ int main() {
         }
         TelemetryRecorder2D legacy;
         legacy.load(badFile);
-        require(legacy.size() == 1 && !legacy.at(0).targetObject,
-                "Version 2 remains readable without fabricated target geometry");
+        require(legacy.size() == 1 && !legacy.at(0).targetObject &&
+                    legacy.at(0).joints[0].linkRadius == 0.0,
+                "Version 2 remains readable with centreline links");
+        {
+            std::ofstream previous(badFile);
+            previous << "RARM2D 3 1\n0 0 0 1 2 0\n1 0 0 0\n2 1 0 0\n"
+                        "B 0.2 0.1 0.15 0.02 0.3\n";
+        }
+        legacy.load(badFile);
+        require(legacy.at(0).targetObject &&
+                    legacy.at(0).targetObject->shape == TargetShape2D::Rectangle &&
+                    legacy.at(0).joints[1].linkRadius == 0.0,
+                "Version 3 keeps its target geometry and centreline links");
         {
             std::ofstream invalid(badFile);
             invalid << "RARM2D 3 1\n0 0 0 1 2 0\n"
@@ -145,6 +160,17 @@ int main() {
         catch (const std::exception&) { rejected = true; }
         require(rejected && loaded.size() == 3,
                 "Corrupt load must leave existing recording unchanged");
+
+        {
+            std::ofstream invalid(badFile);
+            invalid << "RARM2D 4 1\n0 0 0 1 2 0\n"
+                       "1 0 0 0 -0.1\n2 1 0 0 0.2\nN\n";
+        }
+        rejected = false;
+        try { loaded.load(badFile); }
+        catch (const std::exception&) { rejected = true; }
+        require(rejected && loaded.size() == 3,
+                "Invalid radii must leave the previous recording intact");
 
         rejected = false;
         try {

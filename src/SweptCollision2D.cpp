@@ -215,6 +215,7 @@ bool sweptArmClear(
         if (!geometry::validObstacle(obstacle))
             throw std::invalid_argument("Invalid swept obstacle");
 
+    const auto radii = linkRadii2D(joints);
     if (cancellation.stop_requested()) return false;
     // With two links, there are no nonadjacent links to collide.
     if (obstacles.empty() && joints.size() <= 2 && !targetBody) return true;
@@ -231,12 +232,11 @@ bool sweptArmClear(
         forwardKinematics(joints, startAngles, positions);
         initialTargetContact.resize(joints.size());
         for (std::size_t i = 0; i < joints.size(); ++i) {
-            const auto offset = positions[i + 1] - positions[i];
-            const double length = joints[i].length;
-            const double protectedLength = i + 1 == joints.size() ? length - toolLength : length;
-            const auto end = positions[i] + offset * (protectedLength / length);
+            const auto end = i + 1 == joints.size() ?
+                toolContactStart2D(positions[i], positions[i + 1], toolLength) :
+                positions[i + 1];
             initialTargetContact[i] = geometry::segmentHitsObstacle(
-                positions[i], end, *targetBody, shaftClearance);
+                positions[i], end, *targetBody, shaftClearance + joints[i].linkRadius);
         }
     }
 
@@ -263,18 +263,18 @@ bool sweptArmClear(
         // Midpoint collision means the entire edge is not safe.
         if (!obstacles.empty() &&
             geometry::hasObstacleCollision(
-                positions, obstacles, obstacleClearance))
+                positions, obstacles, obstacleClearance, radii))
             return false;
         if (joints.size() >= 3 &&
-            hasSelfCollision(positions, selfClearance))
+            hasSelfCollision(positions, selfClearance, radii))
             return false;
 
         const double displacement = halfInterval * maximumPointSpeed + guard;
         const bool sceneCertified = obstacles.empty() ||
             !geometry::hasObstacleCollision(
-                positions, obstacles, obstacleClearance + displacement);
+                positions, obstacles, obstacleClearance + displacement, radii);
         const bool selfCertified = joints.size() <= 2 ||
-            !hasSelfCollision(positions, selfClearance + 2.0 * displacement);
+            !hasSelfCollision(positions, selfClearance + 2.0 * displacement, radii);
         bool targetCertified = true;
         if (targetBody) {
             double angle = 0.0, angleAtStart = 0.0, rate = 0.0, rateBound = 0.0;
@@ -297,8 +297,9 @@ bool sweptArmClear(
                     accelerationBound + protectedLength * rateBound * rateBound
                 };
                 const double shaftDisplacement = halfInterval * shaft.speedBound + guard;
+                const double targetClearance = shaftClearance + joints[i].linkRadius;
                 if (geometry::segmentHitsObstacle(shaft.start, shaft.point(shaft.length),
-                                                   *targetBody, shaftClearance + shaftDisplacement)) {
+                                                   *targetBody, targetClearance + shaftDisplacement)) {
                     if (initialTargetContact[i]) {
                         // Each interval is either entirely clear or has
                         // nondecreasing distance. A link that becomes clear
@@ -314,7 +315,7 @@ bool sweptArmClear(
                         }
                     } else {
                         if (geometry::segmentHitsObstacle(shaft.start, shaft.point(shaft.length),
-                                                          *targetBody, shaftClearance))
+                                                          *targetBody, targetClearance))
                             return false;
                         targetCertified = false;
                     }

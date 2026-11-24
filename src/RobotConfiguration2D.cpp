@@ -1,5 +1,6 @@
 #include "robotics/kinematics/RobotConfiguration2D.hpp"
 
+#include "robotics/geometry/LinkRadii2D.hpp"
 #include "robotics/kinematics/ForwardKinematics.hpp"
 
 #include <cmath>
@@ -26,6 +27,7 @@ Robot2D makeRobot2D(std::span<const JointDefinition2D> definition,
         const auto& part = definition[i];
         const auto& bounds = part.limits;
         if (!std::isfinite(part.length) || part.length <= 0.0 ||
+            !geometry::validLinkRadius(part.linkRadius) ||
             !std::isfinite(part.initialAngle) ||
             !std::isfinite(bounds.minAngle) || !std::isfinite(bounds.maxAngle) ||
             bounds.minAngle >= bounds.maxAngle ||
@@ -46,11 +48,12 @@ Robot2D makeRobot2D(std::span<const JointDefinition2D> definition,
             if (!positive && !negative)
                 throw std::invalid_argument("Internal joint limits must stay on one safe elbow branch");
         }
-        result.joints.push_back({part.length, part.initialAngle, 0.0});
+        result.joints.push_back({part.length, part.initialAngle, 0.0, part.linkRadius});
         result.limits.push_back(bounds);
     }
 
-    if (hasSelfCollision(forwardKinematics(result.joints), settings.linkClearance))
+    if (hasSelfCollision(forwardKinematics(result.joints), settings.linkClearance,
+                         linkRadii2D(result.joints)))
         throw std::invalid_argument("Initial robot configuration has intersecting links");
     return result;
 }

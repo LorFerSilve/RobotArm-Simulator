@@ -9,9 +9,9 @@ A modular C++20 robotic arm simulator featuring custom kinematics, Jacobian-base
 - Analytic 2 x N Jacobian, Cartesian end-effector velocity, and 2-joint determinant.
 - Custom damped least-squares inverse kinematics, velocity limiting, and target tolerance.
 - Collision-aware GUI motion: analytic two-link IK with a stable elbow branch, angular speed/acceleration caps, joint clearance, nonadjacent-link collision checks, and extra target-object/folding safeguards.
-- CLI frame telemetry and 25 automatic tests using CTest.
+- CLI frame telemetry and 26 automatic tests using CTest.
 - Interactive 2D GUI, using raylib **only** for display and input: target selection by mouse, real-time telemetry, pause/reset, grid and zoom.
-- **Configurable robot arm (Phase 1):** edit 2–6 joints, each link's length and initial relative angle, per-joint rotation range, maximum speed, and maximum acceleration in the GUI.
+- **Configurable robot arm (Phase 1):** edit each link's length and radius, initial joint angle, rotation range, maximum speed and maximum acceleration for 2–6 joints in the GUI.
 
 The GUI and CLI use the **same** C++20 robotics engine. The GUI simulates **kinematics only**, without forces, torques, or 3D dynamics. Its motion controller now prevents specified link overlaps but does not model full rigid-body physics.
 
@@ -96,7 +96,7 @@ collision model. Reaching every feasible goal is not guaranteed.
 
 The right-hand **CONFIGURE** tab contains a simple, dependency-free editor
 built with raylib controls. Select a joint with the arrow buttons; use +/- to
-adjust its **length (metres), initial angle (degrees), minimum/maximum angle
+adjust its **length and link radius (metres), initial angle (degrees), minimum/maximum angle
 (degrees), maximum angular speed (degrees/s)**, and **maximum angular
 acceleration (degrees/s²)**. Add or remove joints (minimum 2, maximum 6 in
 the current GUI). Changes are drafts until **APPLY & RESET ROBOT** is clicked.
@@ -319,9 +319,9 @@ A target inside an obstacle is rejected as `NO SAFE PATH FOUND`.
 The planner uses the existing bounded IK + RRT-Connect implementation to
 look for a collision-free route around obstacles; it can still fail to
 find a valid path within its budget. Obstacle checks cover **every link**,
-including the tool segment; there is no target-style tool-tip exception
-for solid scene obstacles. Clearance around the link centerline is 0.10 m
-(approximately 0.05 m physical half-width + 0.05 m safety clearance).
+including the tool segment. The default 0.10 m scene margin is measured
+from each link's surface. A link's configured radius is added to that
+margin in centreline queries.
 The collision functions support circular and rectangular solids, with
 Euclidean clearances (not only axis-aligned bounding boxes).
 
@@ -520,7 +520,7 @@ These are visualization aids and **not certified swept-volume safety**.
 
 ### Recording and playback
 
-The engine stores time, all link lengths and joint angles/velocities,
+The engine stores time, all link lengths and radii, joint angles/velocities,
 Cartesian target, explicit target geometry and tool-contact length,
 scene obstacles and planner state for each sample.
 Error, accelerations and Jacobian condition are derived from the recorded
@@ -535,10 +535,11 @@ Press **EXIT** to leave replay mode; returning to the live simulator
 remains paused and requires **Space** to plan and resume. Replay never
 executes IK/RRT or changes live robot geometry.
 
-The `.rarm` file is a versioned, dependency-free text format. Version 3
-preserves the target shape, dimensions, shaft clearance and tool length.
-Version 2 recordings remain readable. A malformed file leaves the
-previous session intact. Git ignores the GUI's session file.
+The `.rarm` file is a versioned, dependency-free text format. Version 4
+preserves per-link radii, target shape, dimensions, shaft clearance and
+tool length. Versions 2 and 3 remain readable and use centreline links.
+A malformed file leaves the previous session intact. Git ignores the
+GUI's session file.
 
 Phase 4 is covered by `Telemetry2D` CTest, including singularity
 detection, derived acceleration, bounded history, file round-trips,
@@ -593,10 +594,34 @@ older CLI clients and regression fixtures retain their old behavior;
 the GUI opts into the new explicit model.
 
 The continuous target checks apply to the explicit model. Legacy
-`targetClearance` retains its sampled behavior. Independent link radii,
-approach-facing direction and continuous swept checks for arbitrary curves
-remain open.
+`targetClearance` retains its sampled behavior. Approach-facing direction
+and continuous swept checks for arbitrary curves remain open.
 
 `TargetObject2D` covers both shapes through planning and execution,
 including safe retreat, deeper contact, re-entry and a grazing collision
 between clear samples.
+
+## 2D-A — Per-link radii and clearance
+
+In **CONFIG**, choose a joint, set **Link radius (m)** and select
+**APPLY & RESET ROBOT**. A radius of zero preserves the centreline model
+for older configurations. A positive radius gives the link a capsule
+with round end caps. Set `JointDefinition2D::linkRadius` when building a
+robot through the core API.
+
+| Check | Clearance measured from the centreline |
+| --- | --- |
+| Static scene obstacle | Link radius + scene margin |
+| Nonadjacent links | Both link radii + self-collision margin |
+| Explicit target | Protected shaft radius + target clearance |
+
+Adjacent links share a pivot and remain governed by angular limits.
+The final shaft is clipped at the tool start and retains its round cap.
+The distal tool can contact the selected target. The full last link
+is checked against scene obstacles.
+
+The canvas draws each link at its physical width. **ANALYZE** uses the
+same scene and shaft margins as the engine, and splits the self-collision
+margin evenly across the two participating link envelopes. `LinkRadii2D`
+tests asymmetric widths, tangency, swept contact and follower rejection
+when a wider tool invalidates an earlier plan.

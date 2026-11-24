@@ -48,7 +48,9 @@ constexpr Color red{246, 120, 122, 255};
 using robotics::kinematics::JointDefinition2D;
 using robotics::kinematics::JointLimits2D;
 using robotics::kinematics::Robot2D;
+using robotics::kinematics::linkRadii2D;
 using robotics::kinematics::makeRobot2D;
+using robotics::kinematics::toolContactStart2D;
 
 constexpr double degToRad = std::numbers::pi / 180.0;
 constexpr std::size_t maxGuiJoints = 6;
@@ -144,7 +146,19 @@ void drawGrid(const Viewport& view, int canvasWidth, int height) {
     EndScissorMode();
 }
 
-void drawArm(const Viewport& view, const std::vector<Vec2>& positions,
+void drawCapsule(const Viewport& view, Vec2 from, Vec2 to, double radius, Color color) {
+    const auto a = view.toScreen(from);
+    const auto b = view.toScreen(to);
+    const float pixels = static_cast<float>(radius * view.pixelsPerMetre);
+    DrawLineEx(a, b, pixels > 0.0F ? 2.0F * pixels : 2.0F, color);
+    if (pixels > 0.0F) {
+        DrawCircleV(a, pixels, color);
+        DrawCircleV(b, pixels, color);
+    }
+}
+
+void drawArm(const Viewport& view, std::span<const Vec2> positions,
+             std::span<const Joint2D> joints,
              Vec2 target, bool reachable,
              const std::optional<robotics::kinematics::TargetObject2D>& object) {
     const auto destination = view.toScreen(target);
@@ -157,21 +171,15 @@ void drawArm(const Viewport& view, const std::vector<Vec2>& positions,
               {destination.x, destination.y + 19.0F}, targetColor);
 
     const Color linkColors[] = {blue, orange, green};
-    for (std::size_t i = 1; i < positions.size(); ++i) {
-        DrawLineEx(view.toScreen(positions[i - 1]), view.toScreen(positions[i]),
-                   10.0F, linkColors[(i - 1) % 3]);
-    }
-    if (object && positions.size() >= 2) {
-        const auto start = positions[positions.size() - 2];
+    for (std::size_t i = 0; i < joints.size(); ++i)
+        drawCapsule(view, positions[i], positions[i + 1],
+                    joints[i].linkRadius, linkColors[i % 3]);
+    if (object && !joints.empty()) {
+        const auto start = positions[joints.size() - 1];
         const auto tip = positions.back();
-        const auto delta = tip - start;
-        const double length = delta.length();
-        if (length > 0.0) {
-            const auto toolStart = tip - delta *
-                (std::min(object->toolLength, length) / length);
-            DrawLineEx(view.toScreen(toolStart), view.toScreen(tip),
-                       6.0F, Color{81, 230, 173, 255});
-        }
+        const auto toolStart = toolContactStart2D(start, tip, object->toolLength);
+        DrawLineEx(view.toScreen(toolStart), view.toScreen(tip),
+                   2.0F, Color{81, 230, 173, 255});
     }
     for (std::size_t i = 0; i < positions.size(); ++i) {
         const auto p = view.toScreen(positions[i]);
@@ -201,44 +209,36 @@ void drawEndEffectorTrace(const Viewport& view, std::span<const Vec2> trace) {
     DrawText("PLANNED TIP PATH", 20, headerHeight + 15, 13, markerColor);
 }
 
-// Analyze overlay: visualize the model's link clearance and future pose.
-// These are graphical estimates, NOT certified continuous collision checks.
 void drawCollisionEnvelope(const Viewport& view, std::span<const Vec2> positions,
-                           Vec2 target, double linkRadius, double targetRadius,
+                           std::span<const Joint2D> joints, Vec2 target,
+                           const robotics::kinematics::MotionSettings2D& settings,
                            const std::optional<robotics::kinematics::TargetObject2D>& object) {
-    const Color envelope{248, 181, 88, 48};
-    const float thickness = std::max(2.0F,
-        static_cast<float>(2.0 * linkRadius) * view.pixelsPerMetre);
-    const float radius = thickness * 0.5F;
-    for (std::size_t i = 1; i < positions.size(); ++i) {
-        const auto a = view.toScreen(positions[i-1]);
-        const auto b = view.toScreen(positions[i]);
-        DrawLineEx(a, b, thickness, envelope);
-        DrawCircleV(a, radius, envelope);
-        DrawCircleV(b, radius, envelope);
+    constexpr Color sceneEnvelope{248, 181, 88, 35};
+    constexpr Color selfEnvelope{80, 167, 245, 42};
+    constexpr Color shaftEnvelope{246, 120, 122, 49};
+    for (std::size_t i = 0; i < joints.size(); ++i) {
+        const auto start = positions[i];
+        const auto end = positions[i + 1];
+        const double radius = joints[i].linkRadius;
+        drawCapsule(view, start, end, radius + settings.obstacleClearance, sceneEnvelope);
+        // Splitting the pairwise gap in two makes visual overlap correspond
+        // to the same nonadjacent-link test used by the engine.
+        drawCapsule(view, start, end, radius + settings.linkClearance * 0.5, selfEnvelope);
+        if (object) {
+            const auto shaftEnd = i + 1 == joints.size() ?
+                toolContactStart2D(start, end, object->toolLength) : end;
+            drawCapsule(view, start, shaftEnd, radius + object->clearance, shaftEnvelope);
+        }
     }
-    const auto pt = view.toScreen(target);
-    const Color contactZone{246, 120, 122, 38};
-    const Color border{246, 120, 122, 138};
-    if (object && object->shape ==
-                  robotics::kinematics::TargetShape2D::Rectangle) {
-        // Square-corner visualization of the expanded target body.
-        // The engine applies isotropic rounded-corner clearance.
-        const float hw = static_cast<float>(
-            object->halfWidth + object->clearance) * view.pixelsPerMetre;
-        const float hh = static_cast<float>(
-            object->halfHeight + object->clearance) * view.pixelsPerMetre;
-        const Rectangle padded{pt.x-hw, pt.y-hh, 2.0F*hw, 2.0F*hh};
-        DrawRectangleRec(padded, contactZone);
-        DrawRectangleLinesEx(padded, 1.5F, border);
-    } else {
-        const double radiusMeters = object ?
-            object->radius + object->clearance : targetRadius;
+    DrawText("SCENE CLEARANCE", 20, headerHeight + 37, 12, orange);
+    DrawText("SELF CLEARANCE", 155, headerHeight + 37, 12, blue);
+    if (object)
+        DrawText("TARGET SHAFT", 280, headerHeight + 37, 12, red);
+    if (!object && settings.targetClearance > 0.0) {
+        const auto pt = view.toScreen(target);
         const float targetPixels =
-            static_cast<float>(radiusMeters) * view.pixelsPerMetre;
-        DrawCircleV(pt, targetPixels, contactZone);
-        DrawCircleLines(static_cast<int>(pt.x), static_cast<int>(pt.y),
-                        targetPixels, border);
+            static_cast<float>(settings.targetClearance) * view.pixelsPerMetre;
+        DrawCircleV(pt, targetPixels, shaftEnvelope);
     }
 }
 
@@ -262,9 +262,9 @@ void drawJointTraces(const Viewport& view,
     for (std::size_t i = 0; i < terminal.size(); ++i)
         terminal[i].angle = goalAngles[i];
     const auto points = robotics::kinematics::forwardKinematics(terminal);
-    for (std::size_t i = 1; i < points.size(); ++i)
-        DrawLineEx(view.toScreen(points[i - 1]), view.toScreen(points[i]),
-                   4.0F, Color{80, 217, 166, 82});
+    for (std::size_t i = 0; i < robot.size(); ++i)
+        drawCapsule(view, points[i], points[i + 1], robot[i].linkRadius,
+                    Color{80, 217, 166, 82});
 }
 
 bool button(int x, int y, int w, int h, const char* label,
@@ -298,11 +298,11 @@ const char* toolName(CanvasTool tool) {
 }
 
 bool shapeSafe(const Obstacle2D& obstacle, const std::vector<Vec2>& positions,
-               double margin) {
+               std::span<const Joint2D> joints, double margin) {
     return geom::validObstacle(obstacle) &&
         !geom::hasObstacleCollision(positions,
                                    std::span<const Obstacle2D>(&obstacle, 1),
-                                   margin);
+                                   margin, linkRadii2D(joints));
 }
 
 void moveObstacle(Obstacle2D& obstacle, Vec2 position) {
@@ -428,7 +428,8 @@ bool drawTargetObjectPanel(int panelX,
 bool drawObstaclePanel(int x, int height, CanvasTool& tool,
                        std::vector<Obstacle2D>& obstacles, int& selected,
                        std::string& message, const std::vector<Vec2>& positions,
-                       double clearance, Vector2 mouse, bool click) {
+                       std::span<const Joint2D> joints, double clearance,
+                       Vector2 mouse, bool click) {
     const int left = x + 20;
     int y = headerHeight + 137;
     bool changed = false;
@@ -497,7 +498,7 @@ bool drawObstaclePanel(int x, int height, CanvasTool& tool,
                     else shape.halfHeight =
                         std::clamp(shape.halfHeight + change * 0.5, 0.1, 5.0);
                 }
-                if (shapeSafe(updated, positions, clearance)) {
+                if (shapeSafe(updated, positions, joints, clearance)) {
                     obstacles[static_cast<std::size_t>(selected)] = updated;
                     changed = true;
                     message = "Obstacle size updated.";
@@ -554,19 +555,19 @@ void drawConfigurator(int x, int height, std::vector<JointDefinition2D>& draft,
     y += 48;
 
     auto& item = draft[selected];
-    const std::array<const char*, 6> labels{
-        "Length (m)", "Initial angle (deg)", "Minimum angle (deg)",
+    const std::array<const char*, 7> labels{
+        "Length (m)", "Link radius (m)", "Initial angle (deg)", "Minimum angle (deg)",
         "Maximum angle (deg)", "Max speed (deg/s)", "Max accel (deg/s^2)"};
-    const std::array<double, 6> values{
-        item.length, item.initialAngle * radToDeg,
+    const std::array<double, 7> values{
+        item.length, item.linkRadius, item.initialAngle * radToDeg,
         item.limits.minAngle * radToDeg, item.limits.maxAngle * radToDeg,
         item.limits.maxAngularSpeed * radToDeg,
         item.limits.maxAngularAcceleration * radToDeg};
-    const std::array<double, 6> steps{0.1, 5.0, 5.0, 5.0, 10.0, 20.0};
+    const std::array<double, 7> steps{0.1, 0.01, 5.0, 5.0, 5.0, 10.0, 20.0};
 
     for (std::size_t i = 0; i < labels.size(); ++i) {
         DrawText(labels[i], left, y, 14, muted);
-        DrawText(TextFormat(i == 0 ? "%.2f" : "%.0f", values[i]),
+        DrawText(TextFormat(i < 2 ? "%.2f" : "%.0f", values[i]),
                  left + 162, y, 16, light);
         const bool minus = button(left + 233, y - 5, 32, 27, "-", mouse, click);
         const bool plus = button(left + 273, y - 5, 32, 27, "+", mouse, click);
@@ -574,17 +575,18 @@ void drawConfigurator(int x, int height, std::vector<JointDefinition2D>& draft,
             const double change = steps[i] * (plus ? 1.0 : -1.0);
             switch (i) {
             case 0: item.length = std::clamp(item.length + change, 0.1, 5.0); break;
-            case 1: item.initialAngle += change * degToRad; break;
-            case 2: item.limits.minAngle += change * degToRad; break;
-            case 3: item.limits.maxAngle += change * degToRad; break;
-            case 4: item.limits.maxAngularSpeed =
+            case 1: item.linkRadius = std::clamp(item.linkRadius + change, 0.0, 0.5); break;
+            case 2: item.initialAngle += change * degToRad; break;
+            case 3: item.limits.minAngle += change * degToRad; break;
+            case 4: item.limits.maxAngle += change * degToRad; break;
+            case 5: item.limits.maxAngularSpeed =
                 std::clamp(item.limits.maxAngularSpeed + change * degToRad, 10.0 * degToRad, 6.0); break;
-            case 5: item.limits.maxAngularAcceleration =
+            case 6: item.limits.maxAngularAcceleration =
                 std::clamp(item.limits.maxAngularAcceleration + change * degToRad, 20.0 * degToRad, 20.0); break;
             }
             feedback = "Changes pending: press APPLY";
         }
-        y += 45;
+        y += 40;
     }
     y += 10;
     if (button(left, y, 305, 35, "APPLY & RESET ROBOT", mouse, click))
@@ -967,7 +969,8 @@ int main() {
             auto nextDefinition = changePreset ? makePreset(nextCount) : appliedDefinition;
             auto nextRobot = makeRobot2D(nextDefinition, motionSettings);
             if (geom::hasObstacleCollision(forwardKinematics(nextRobot.joints),
-                                            obstacles, motionSettings.obstacleClearance)) {
+                                            obstacles, motionSettings.obstacleClearance,
+                                            linkRadii2D(nextRobot.joints))) {
                 obstacleFeedback = "Blocked: preset intersects obstacle.";
                 sceneChanged();
             } else {
@@ -1000,7 +1003,11 @@ int main() {
         const int height = GetScreenHeight();
         const int canvasWidth = width - sidebarWidth;
         double reach = 0.0;
-        for (const auto& joint : joints) reach += joint.length;
+        double widestRadius = 0.0;
+        for (const auto& joint : joints) {
+            reach += joint.length;
+            widestRadius = std::max(widestRadius, joint.linkRadius);
+        }
         const Vector2 mouse = GetMousePosition();
         const bool mouseInCanvas = mouse.x >= 0.0F &&
             mouse.x < static_cast<float>(canvasWidth) &&
@@ -1009,7 +1016,7 @@ int main() {
         if (mouseInCanvas) {
             zoom = std::clamp(zoom + GetMouseWheelMove() * 0.12F, 0.55F, 2.5F);
         }
-        const auto viewport = makeViewport(canvasWidth, height, reach, zoom);
+        const auto viewport = makeViewport(canvasWidth, height, reach + widestRadius, zoom);
         if (!replayActive) {
             if (IsKeyPressed(KEY_T)) canvasTool = CanvasTool::Target;
             if (IsKeyPressed(KEY_C)) { canvasTool = CanvasTool::PlaceCircle; activeTab = 2; }
@@ -1037,7 +1044,7 @@ int main() {
                         Obstacle2D{Circle2D{worldMouse, 0.4}} :
                         Obstacle2D{Box2D{worldMouse, 0.6, 0.35}};
                     if (shapeSafe(created, forwardKinematics(joints),
-                                  motionSettings.obstacleClearance)) {
+                                  joints, motionSettings.obstacleClearance)) {
                         obstacles.push_back(created);
                         selectedObstacle = static_cast<int>(obstacles.size()) - 1;
                         obstacleEdited = true;
@@ -1064,7 +1071,7 @@ int main() {
             auto candidate = obstacles[static_cast<std::size_t>(selectedObstacle)];
             moveObstacle(candidate, worldMouse);
             if (shapeSafe(candidate, forwardKinematics(joints),
-                          motionSettings.obstacleClearance)) {
+                          joints, motionSettings.obstacleClearance)) {
                 obstacles[static_cast<std::size_t>(selectedObstacle)] = candidate;
                 obstacleEdited = true;
                 obstacleFeedback = "Obstacle moved.";
@@ -1187,11 +1194,6 @@ int main() {
                   replayActive ? -1 : selectedObstacle);
         if (displayObject)
             drawTargetBody(viewport, displayTarget, *displayObject);
-        if (activeTab == 3)
-            drawCollisionEnvelope(viewport, positions, displayTarget,
-                                  motionSettings.obstacleClearance,
-                                  motionSettings.targetClearance,
-                                  displayObject);
         if (activeTab == 3 && !replayActive && plannedMotion.pathAvailable())
             drawJointTraces(viewport, plannedMotion.jointTraces(),
                             displayJoints, plannedMotion.finalJointAngles());
@@ -1202,8 +1204,11 @@ int main() {
             playback->plannerState == PlannerState2D::NoPath ||
                 playback->plannerState == PlannerState2D::Blocked :
             plannedMotion.searchFailed() || !planningError.empty() || stalled;
-        drawArm(viewport, positions, displayTarget,
+        drawArm(viewport, positions, displayJoints, displayTarget,
                 !unreachable && !displayFailure, displayObject);
+        if (activeTab == 3)
+            drawCollisionEnvelope(viewport, positions, displayJoints, displayTarget,
+                                  motionSettings, displayObject);
         EndScissorMode();
         DrawText("T Target   C Circle   B Box   V Move   DEL Remove   SPACE Pause   2-5 Presets",
                  20, height - 28, 15, muted);
@@ -1237,7 +1242,8 @@ int main() {
                             "Last link must be longer than tool-contact section");
                     if (geom::hasObstacleCollision(forwardKinematics(next.joints),
                                                    obstacles,
-                                                   motionSettings.obstacleClearance))
+                                                   motionSettings.obstacleClearance,
+                                                   linkRadii2D(next.joints)))
                         throw std::invalid_argument("Robot intersects an obstacle");
                     robot = std::move(next);
                     appliedDefinition = draft;
@@ -1272,7 +1278,7 @@ int main() {
                                       joints.back().length, cursor, click) :
                 drawObstaclePanel(panelX, height, canvasTool, obstacles,
                                   selectedObstacle, obstacleFeedback,
-                                  positions, motionSettings.obstacleClearance,
+                                  positions, joints, motionSettings.obstacleClearance,
                                   cursor, click);
             if (changed) sceneChanged();
         } else if (activeTab == 3) {
